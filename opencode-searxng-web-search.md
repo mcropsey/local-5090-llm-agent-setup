@@ -14,11 +14,12 @@ opencode (laptop) ──> mcp-searxng (local MCP process) ──HTTP──> Sear
 
 ## Step 1 — Run SearXNG as a container on your server
 
-On the Linux host (e.g. your podman box). Minimal run:
+On the Linux host (e.g. your podman box):
 
 ```bash
 podman run -d \
   --name searxng \
+  --restart=unless-stopped \
   -p 8080:8080 \
   -v searxng-config:/etc/searxng:z \
   docker.io/searxng/searxng:latest
@@ -26,7 +27,32 @@ podman run -d \
 
 - Pick a host port that's free on that box (8080 shown; adjust if taken).
 - The volume persists config so your edits in Step 2 survive restarts.
+- `--restart=unless-stopped` sets the restart policy (needed for Step 1b below).
 - `docker run` is identical if you're on Docker instead of podman.
+
+### Step 1b — Make the container survive a host reboot
+
+**Gotcha:** unlike Docker, podman's `--restart` policy does NOT automatically start
+containers after a *host reboot* on its own. The flag only handles the container crashing
+or being stopped while the host stays up. To replay restart policies on boot, enable the
+podman-restart systemd service:
+
+```bash
+sudo systemctl enable --now podman-restart.service
+```
+
+This service starts (on boot) every container that has a `--restart` policy of `always` or
+`unless-stopped`. Without it, SearXNG stays down after the server reboots until you manually
+start it.
+
+> Note: `podman-restart.service` is a **system** service and covers containers run as root.
+> If you're running SearXNG as a **rootless** user, enable the user-scoped equivalent and
+> keep the session alive across logout instead:
+> ```bash
+> systemctl --user enable --now podman-restart.service
+> sudo loginctl enable-linger $USER
+> ```
+> `enable-linger` is what lets rootless containers start at boot without you logging in.
 
 ---
 
@@ -198,8 +224,11 @@ unreliable for daily work. Self-hosting (above) is the real answer.
 
 ```bash
 # On the server:
-podman run -d --name searxng -p 8080:8080 -v searxng-config:/etc/searxng:z \
-  docker.io/searxng/searxng:latest
+podman run -d --name searxng --restart=unless-stopped -p 8080:8080 \
+  -v searxng-config:/etc/searxng:z docker.io/searxng/searxng:latest
+sudo systemctl enable --now podman-restart.service   # survive host reboots
+# (rootless instead: systemctl --user enable --now podman-restart.service
+#                    sudo loginctl enable-linger $USER)
 # edit settings.yml -> search.formats: add json -> podman restart searxng
 
 # From the laptop (must return JSON):
