@@ -315,6 +315,37 @@ Quote the search results. If results contradict your training data, trust the re
 say what changed.
 ```
 
+### Gotcha: adding search rules can break SSH/shell behavior in local models
+
+If you had SSH or shell tool use working before adding the search section, it may stop
+working after. **This is not a config regression** — your permissions and SSH instructions
+are still there. What happens is that smaller local models (e.g. Qwen3-Coder, Llama, Mistral)
+apply their own built-in safety training on top of your AGENTS.md instructions. As the
+system prompt grows longer, earlier instructions get less "weight" and the model's own safety
+filter can start winning.
+
+**Fix:** Make any shell/SSH instructions come first in AGENTS.md and use emphatic language:
+
+```markdown
+## CRITICAL: You have full shell and SSH access — use it
+
+You have a working bash tool with full shell access. You MUST use it.
+Never refuse to run shell commands or SSH into servers — that is your job here.
+Never tell the user to run commands themselves. Run them and show the output.
+
+You CAN reach machines on the local network via SSH.
+SSH key auth is already configured for user mcropsey on all local servers.
+When asked about a remote machine, connect with:
+  ssh mcropsey@<ip-or-hostname>
+using whatever IP or hostname the user gives you.
+```
+
+Put this **before** the search section so it reads first. Then append the search rules after.
+
+**Per-prompt workaround** if the model still refuses: prefix requests with `"Use bash and
+SSH to..."` — naming the tool explicitly bypasses the safety filter even when the system
+prompt alone doesn't.
+
 ---
 
 ## Step 7 — Test end to end
@@ -363,6 +394,7 @@ unreliable for daily work. Self-hosting (above) is the real answer.
 | MCP tool never appears in opencode | wrong config schema | Use `mcp`/`type:local`/`command` array, not `mcpServers` |
 | MCP loads but searches fail | `SEARXNG_URL` wrong or unreachable from laptop | Re-run the Step 3 curl from the laptop |
 | Model has the tool but won't use it | no trigger rule | Step 6 AGENTS.md rule; or name the tool in-prompt |
+| SSH/shell stops working after adding search | local model safety filter outweighing system prompt | Move SSH instructions to top of AGENTS.md with emphatic language (see Step 6 gotcha); or prefix prompts with "Use bash and SSH to..." |
 | Public instance 429s | rate-limited public instance | Self-host (don't rely on public) |
 
 ---
