@@ -4,11 +4,113 @@ Goal: give the local model live web search with **no API key, no rate limits, no
 your network**. SearXNG runs as a container on a Linux server in your env; opencode on the
 laptop talks to it over the LAN via the `mcp-searxng` MCP server.
 
-**Architecture** (same shape as your LM Studio setup — service on a server, client over LAN):
+---
+
+## How all the pieces fit together
 
 ```
-opencode (laptop) ──> mcp-searxng (local MCP process) ──HTTP──> SearXNG container (server:8080)
+┌─────────────────────────────────────────────────────────────────────┐
+│  LAPTOP                                                             │
+│                                                                     │
+│  ┌─────────────┐   MCP protocol   ┌──────────────────────────────┐ │
+│  │   opencode  │ ───────────────► │  mcp-searxng                 │ │
+│  │  (the CLI)  │ ◄─────────────── │  (Node.js process)           │ │
+│  └─────────────┘   tool results   │                              │ │
+│                                   │  started by opencode via:    │ │
+│                                   │  npx -y mcp-searxng          │ │
+│                                   │                              │ │
+│                                   │  fetched from npmjs.com      │ │
+│                                   │  on first launch, cached in  │ │
+│                                   │  ~/.npm/_npx/                │ │
+│                                   └──────────────┬───────────────┘ │
+│                                                  │ HTTP            │
+└──────────────────────────────────────────────────┼─────────────────┘
+                                                   │
+                                    LAN (e.g. 192.168.1.x)
+                                                   │
+┌──────────────────────────────────────────────────┼─────────────────┐
+│  SERVER                                          │                 │
+│                                   ┌──────────────▼───────────────┐ │
+│                                   │  SearXNG container           │ │
+│                                   │  port 8080                   │ │
+│                                   │                              │ │
+│                                   │  GET /search?q=...&format=json│ │
+│                                   └──────────────┬───────────────┘ │
+│                                                  │                 │
+└──────────────────────────────────────────────────┼─────────────────┘
+                                                   │ HTTPS
+                                            public search
+                                            engines (Google,
+                                            Bing, DDG, etc.)
 ```
+
+**What each piece does:**
+
+| Component | Where it runs | What it is |
+|---|---|---|
+| opencode | Laptop | The AI coding CLI — orchestrates the model and MCP tools |
+| mcp-searxng | Laptop (subprocess) | Node.js MCP server; translates opencode tool calls into SearXNG HTTP requests |
+| npx | Laptop | Node.js package runner — downloads and runs mcp-searxng from npm automatically |
+| SearXNG | Remote server | Self-hosted meta-search engine; fans out queries to real search engines and returns JSON |
+
+---
+
+## Prerequisite: Node.js must be installed on the laptop
+
+`npx` is how opencode launches `mcp-searxng`. It's bundled with Node.js — if Node is
+installed, you have `npx`. opencode itself often pulls Node in as a dependency, so it may
+already be there.
+
+Verify:
+
+```bash
+node --version    # e.g. v20.x.x
+npx --version     # should just work if node does
+which node        # shows where it came from
+```
+
+If `node` is missing, install it. Common ways:
+
+```bash
+# macOS
+brew install node
+
+# Debian/Ubuntu
+sudo apt install nodejs npm
+
+# Fedora/Rocky
+sudo dnf install nodejs
+
+# Or install a version manager (nvm, fnm) for more control
+```
+
+### How mcp-searxng gets onto your machine
+
+You don't install it manually. The `npx -y mcp-searxng` in your config does it automatically:
+
+1. On first opencode launch, opencode runs `npx -y mcp-searxng`.
+2. `npx` checks whether the package is already cached.
+3. If not, it fetches it from **npmjs.com** and caches it in `~/.npm/_npx/`.
+4. It runs the cached copy. No `npm install`, no `git clone` needed.
+
+The `-y` flag means "don't prompt, just download" — so it pulls silently.
+
+**Supply-chain note:** `npx -y <package>` runs code from the internet that you didn't audit.
+For this specific package:
+
+- Confirm the npm listing points at `ihor-sokoliuk/mcp-searxng` on GitHub (not a typosquat):
+  ```bash
+  npm view mcp-searxng
+  ```
+- The config uses no version pin, so `npx` can silently pull a newer version on re-fetch.
+  To lock it, pin explicitly:
+  ```json
+  "command": ["npx", "-y", "mcp-searxng@1.0.0"]
+  ```
+  Find the current version with `npm view mcp-searxng version`, then decide when to upgrade
+  deliberately instead of automatically.
+
+---
 
 ---
 
