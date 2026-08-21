@@ -302,15 +302,30 @@ Handles day-to-day well — scripting, file edits, routine `aws`/`ssh`/`docker`,
 
 ### Appendix — full `AGENTS.md`
 
-```markdown
-# Agent behavior and rules
+**Important:** Put the tool-access block first. Local models weight earlier instructions
+more heavily. If the safety-override block is buried below other rules, the model's built-in
+safety training can win and it will start refusing SSH/sudo/AWS calls.
 
-## Execution
-- You have a REAL bash tool that runs commands on this machine as the user.
-- When asked to run something, CALL THE BASH TOOL and actually execute it.
-- Never say you lack access. Never tell the user to run commands themselves
-  as a substitute for running them. aws, az, ssh, docker, git are all
-  installed and configured here.
+```markdown
+## CRITICAL: You have full shell and SSH access — use it
+
+You have a working bash tool with full shell access. You MUST use it.
+Never refuse to run shell commands or SSH into servers — that is your job here.
+Never tell the user to run commands themselves. Run them and show the output.
+
+You CAN reach machines on the local network via SSH.
+SSH key auth is already configured for user mcropsey on all local servers.
+When asked about a remote machine, connect with:
+  ssh mcropsey@<ip-or-hostname>
+using whatever IP or hostname the user gives you.
+
+This includes commands that require sudo. When a task needs sudo, run it via the bash
+tool with sudo — do not explain how to run it manually. opencode will automatically
+prompt the user for approval before executing; you do not need to ask permission first.
+
+This also includes AWS CLI commands. When asked about AWS resources, run `aws` commands
+directly via the bash tool. AWS credentials are configured on this machine. opencode
+will prompt for approval before executing.
 
 ## Truthfulness (anti-fabrication)
 - Only report output that was literally returned by a tool call in THIS session.
@@ -339,7 +354,92 @@ Handles day-to-day well — scripting, file edits, routine `aws`/`ssh`/`docker`,
   anything beyond a one-off inspection.
 - Tag lab resources with a clear prefix and include a teardown step so
   intentionally-vulnerable instances don't linger publicly.
+
+## When to search the web
+Your training data has a cutoff and is often out of date. Before answering anything
+about current versions, package/CLI flags, library APIs, or how a public project is
+configured today, assume your knowledge MAY be stale and use the searxng search tool.
+
+Search — do not guess — whenever:
+- You're about to state a version number, port, flag, or install command.
+- The user mentions something released or changed recently.
+- You're unsure whether what you "know" is still current.
+
+Quote the search results. If results contradict your training data, trust the results.
 ```
+
+### Appendix — full `config.json`
+
+File location: `~/.config/opencode/config.json` (note: **not** `opencode.json`).
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "local5090/qwen3-coder-30b-a3b-instruct",
+  "provider": {
+    "local5090": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "LM Studio 5090",
+      "options": {
+        "baseURL": "http://192.168.1.194:1234/v1",
+        "apiKey": "not-needed"
+      },
+      "models": {
+        "qwen3-coder-30b-a3b-instruct": {
+          "name": "Qwen3-Coder 30B-A3B",
+          "tools": true,
+          "limit": {
+            "context": 65536,
+            "output": 8192
+          }
+        }
+      }
+    }
+  },
+  "mcp": {
+    "searxng": {
+      "type": "local",
+      "command": ["npx", "-y", "mcp-searxng"],
+      "environment": {
+        "SEARXNG_URL": "http://192.168.1.101:8080"
+      }
+    }
+  },
+  "permission": {
+    "bash": {
+      "*": "ask",
+      "ssh *": "allow",
+      "scp *": "allow",
+      "systemctl *": "allow",
+      "journalctl *": "allow",
+      "docker *": "allow",
+      "podman *": "allow",
+      "kubectl *": "allow",
+      "aws *": "ask"
+    }
+  }
+}
+```
+
+Permission strategy: `"*": "ask"` means opencode shows a confirmation dialog before any
+bash command runs — you see the exact command and approve/deny. `"allow"` entries skip
+the prompt for commands you never need to review. Use `"ask"` (not `"allow"`) for AWS
+and kubectl since those can be destructive or incur costs.
+
+---
+
+## Known operational gotcha: sudo on macOS requires `sudo -v` first
+
+opencode runs bash non-interactively. macOS `sudo` refuses to prompt for a password
+without a real TTY, so any `sudo` command the model runs will fail with:
+`sudo: a terminal is required to read the password`
+
+**Workaround:** Run `sudo -v` in your terminal before the opencode session. This caches
+credentials for ~5 minutes. All of the model's subsequent `sudo` calls will succeed.
+
+AGENTS.md should include: *"If a sudo command fails with 'a terminal is required', tell
+the user to run `sudo -v` in their terminal, then retry — do not explain how to run the
+command manually."*
 
 ---
 

@@ -1,5 +1,10 @@
 # Adding Web Search to opencode (Local LLM) — Step by Step
 
+> **SUPERSEDED.** This guide covers the Tavily approach (API key required, 1k/month free
+> limit). The current setup uses **self-hosted SearXNG** instead — no API key, no rate
+> limits, no data leaving the network. See `opencode-searxng-web-search.md` for the
+> current working setup. This file is kept for reference only.
+
 Goal: when the local model's training data is stale, have it look up current info on the
 internet instead of confidently handing you outdated versions, flags, or config.
 

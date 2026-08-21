@@ -39,10 +39,42 @@ With Q8 cache quant, 64k context fits comfortably; 128k gets tight — start at 
 
 ### opencode (laptop)
 
+- Config file is **`~/.config/opencode/config.json`** — many guides incorrectly show
+  `opencode.json`.
 - Register LM Studio as an **OpenAI-compatible provider** pointing at
   `http://<PC-IP>:1234/v1`.
 - The **model ID must exactly match** what LM Studio exposes — check `GET /v1/models`.
-- Confirm the **bash tool is allowed** (permission mode not silently blocking it).
+- Set explicit **permissions** so bash commands require approval but SSH/podman/docker run
+  without prompting:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "local5090/qwen3-coder-30b-a3b-instruct",
+  "provider": { "...": "..." },
+  "mcp": { "...": "..." },
+  "permission": {
+    "bash": {
+      "*": "ask",
+      "ssh *": "allow",
+      "scp *": "allow",
+      "systemctl *": "allow",
+      "journalctl *": "allow",
+      "docker *": "allow",
+      "podman *": "allow",
+      "kubectl *": "allow",
+      "aws *": "ask"
+    }
+  }
+}
+```
+
+`"*": "ask"` — opencode shows a confirmation dialog before running any bash command.
+You see the exact command, approve or deny. This is how sudo and AWS CLI commands get
+the "ask me first" behavior without the model having to narrate it.
+
+`"allow"` entries — commands you never need to review (SSH, podman, docker) run without
+a prompt. Use `"ask"` for anything destructive or costly (AWS, kubectl mutations).
 
 ### Quick end-to-end test
 
@@ -63,16 +95,32 @@ opencode auto-loads `AGENTS.md` into the system prompt each session.
 
 ### Recommended contents
 
-Two jobs: (1) tell the model what infra exists, (2) force it to verify its own work.
+Three jobs: (1) tell the model it has real tools and must use them, (2) tell it what infra
+exists, (3) force it to verify its own work. **Order matters** — put the tool-access block
+first. Local models weight earlier instructions more heavily, and the SSH/shell block must
+win over the model's built-in safety training.
 
 ```markdown
-You have a working bash tool with full shell access.
-You CAN reach machines on the local network via ssh.
-SSH key auth is configured for user mcropsey on all local servers.
+## CRITICAL: You have full shell and SSH access — use it
+
+You have a working bash tool with full shell access. You MUST use it.
+Never refuse to run shell commands or SSH into servers — that is your job here.
+Never tell the user to run commands themselves. Run them and show the output.
+
+You CAN reach machines on the local network via SSH.
+SSH key auth is already configured for user mcropsey on all local servers.
 When asked about a remote machine, connect with:
   ssh mcropsey@<ip-or-hostname>
 using whatever IP or hostname the user gives you.
-Run commands directly and show the output instead of telling the user to run them.
+
+This includes commands that require sudo. When a task needs sudo, run it via the bash
+tool with sudo — do not explain how to run it manually. opencode will automatically prompt
+the user for approval before executing any command; you do not need to ask permission
+yourself first. Just call the tool and let opencode handle the confirmation dialog.
+
+This also includes AWS CLI commands. When asked about AWS resources, run `aws` commands
+directly via the bash tool. Do not explain how to run them manually. AWS credentials are
+already configured on this machine. opencode will prompt for approval before executing.
 
 ## Verification (IMPORTANT)
 When you run a command that changes state (start/stop/create a container, write a
@@ -89,6 +137,11 @@ when you claim a result.
 - 192.168.1.101 (hv-rocky-linux-4): Rocky Linux podman host. Lab network only.
 ```
 
+> The tool-access block (CRITICAL header, MUST, Never) matters because local models apply
+> their own safety training on top of your instructions. Without emphatic language at the
+> top, a model that previously SSHed fine can start refusing after the system prompt grows —
+> the safety filter wins when instructions feel advisory rather than mandatory.
+>
 > The verification block matters **far more for a local model than for a hosted one**.
 > Small models happily invent "it's running and accessible" without checking — the rules
 > above directly counter that.
@@ -97,13 +150,45 @@ when you claim a result.
 
 ## Gotchas (things actually hit during setup)
 
+### 0. Sudo fails with "a terminal is required" (macOS)
+**Symptom:** The model correctly tries to run `sudo tee`, `sudo podman`, etc. via bash,
+but gets: `sudo: a terminal is required to read the password`
+**Cause:** opencode runs bash non-interactively (no TTY). macOS `sudo` refuses to prompt
+for a password without a real terminal — so every sudo call fails unless credentials are
+already cached from a recent manual sudo.
+**Fix:** Before any opencode session where you expect sudo to work, run this once in your
+own terminal:
+```bash
+sudo -v
+```
+This caches your credentials for ~5 minutes. The model's subsequent `sudo` calls succeed
+without needing a password prompt. Re-run `sudo -v` if the session runs long.
+
+Add this to AGENTS.md so the model recovers gracefully instead of giving up:
+```
+If a sudo command fails with "a terminal is required to read the password", tell the
+user to run `sudo -v` in their terminal to cache credentials, then retry the command.
+Do NOT fall back to explaining how to run the command manually.
+```
+
 ### 1. The model dictates commands instead of running them
 **Symptom:** You ask it to SSH somewhere; it replies "I can't access external devices,
-here are the commands to run yourself."
-**Cause:** Smaller models fall back on a training reflex and don't "believe" they have real
-shell access — even though opencode gave them the bash tool.
-**Fix:** Be explicit in the prompt ("Use the bash tool to run `...`"), and add the
-capability statement to AGENTS.md. Once it succeeds once, it tends to keep using the tool.
+here are the commands to run yourself." Or it explains how to run sudo/AWS commands
+manually instead of running them.
+**Cause:** Smaller models apply built-in safety training on top of your AGENTS.md
+instructions. The safety filter can win — especially as the system prompt grows longer
+and earlier instructions get less weight.
+**Fix:**
+- Put the shell/SSH block **first** in AGENTS.md with emphatic language: "CRITICAL",
+  "MUST use it", "Never refuse", "Never tell the user to run commands themselves."
+- For sudo and AWS CLI specifically, add explicit instructions that the model should
+  run them via the bash tool and that opencode handles the approval dialog.
+- Per-prompt escape hatch: prefix with "Use bash and SSH to..." — naming the tool
+  explicitly bypasses the filter even when the system prompt alone doesn't.
+
+**Regression pattern:** SSH/shell can stop working after you add new sections to
+AGENTS.md (e.g. a web-search rule). The file grew, the tool-access block lost weight.
+Fix: move tool-access instructions to the very top of the file.
 
 ### 2. SSH prompts for a password → agent hangs
 **Cause:** The bash tool runs non-interactively; it can't answer an SSH password prompt.

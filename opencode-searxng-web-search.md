@@ -346,6 +346,62 @@ Put this **before** the search section so it reads first. Then append the search
 SSH to..."` — naming the tool explicitly bypasses the safety filter even when the system
 prompt alone doesn't.
 
+### Sudo commands: make the model run them, not explain them
+
+By default, local models will explain how to run sudo commands rather than running them. The
+fix is two parts that work together:
+
+**1. Tell the model in AGENTS.md to run sudo via bash:**
+
+```markdown
+This includes commands that require sudo. When a task needs sudo, run it via the bash
+tool with sudo — do not explain how to run it manually. opencode will automatically prompt
+the user for approval before executing any command; you do not need to ask permission
+yourself first. Just call the tool and let opencode handle the confirmation dialog.
+```
+
+**2. The `config.json` permission `"*": "ask"` is already the right setting.** It means
+opencode intercepts every bash command and shows you a confirmation dialog before running it.
+You see the exact command, approve or deny, and only then does it execute. So the model runs
+the sudo command → opencode asks you → you say yes → it runs. You get the confirmation step
+without the model having to narrate it.
+
+```json
+"permission": {
+  "bash": {
+    "*": "ask",
+    "ssh *": "allow"
+  }
+}
+```
+
+If you want specific safe commands to skip the prompt entirely, add them to the allow list
+(e.g. `"sudo podman ps": "allow"`). The `"*": "ask"` catch-all covers everything else.
+
+This same pattern extends to any CLI tool — AWS, kubectl, gcloud, etc. Add the tool to the
+permission block and tell the model in AGENTS.md to run it directly:
+
+```json
+"permission": {
+  "bash": {
+    "*": "ask",
+    "ssh *": "allow",
+    "aws *": "ask",
+    "kubectl *": "ask"
+  }
+}
+```
+
+```markdown
+This also includes AWS CLI commands. When asked about AWS resources, run `aws` commands
+directly via the bash tool. Do not explain how to run them manually. AWS credentials are
+already configured on this machine. opencode will prompt for approval before executing.
+```
+
+Use `"ask"` for tools that can make destructive or costly changes (AWS, kubectl) so you
+always see the exact command before it runs. Use `"allow"` only for read-only or
+inherently safe commands you never need to review.
+
 ---
 
 ## Step 7 — Test end to end
@@ -395,6 +451,7 @@ unreliable for daily work. Self-hosting (above) is the real answer.
 | MCP loads but searches fail | `SEARXNG_URL` wrong or unreachable from laptop | Re-run the Step 3 curl from the laptop |
 | Model has the tool but won't use it | no trigger rule | Step 6 AGENTS.md rule; or name the tool in-prompt |
 | SSH/shell stops working after adding search | local model safety filter outweighing system prompt | Move SSH instructions to top of AGENTS.md with emphatic language (see Step 6 gotcha); or prefix prompts with "Use bash and SSH to..." |
+| sudo commands fail with "terminal is required" | macOS sudo needs a TTY to prompt for password; opencode runs bash non-interactively | Run `sudo -v` in your terminal before the session to cache credentials (~5 min window) |
 | Public instance 429s | rate-limited public instance | Self-host (don't rely on public) |
 
 ---
