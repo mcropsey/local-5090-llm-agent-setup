@@ -12,12 +12,15 @@ opencode (laptop) ──> mcp-searxng (local MCP process) ──HTTP──> Sear
 
 ---
 
-## Step 1 — Run SearXNG as a container on your server
+## Step 1 — Run SearXNG as a container on your server (rootful)
 
-On the Linux host (e.g. your podman box):
+Run this **as root** (with `sudo`). We use **rootful** podman deliberately — it keeps all
+storage paths predictable (`/var/lib/containers/...`), matches the system-level
+`podman-restart.service` in Step 1b, and avoids the rootless linger/user-service complexity.
+Run every `podman` command in this guide with `sudo`.
 
 ```bash
-podman run -d \
+sudo podman run -d \
   --name searxng \
   --restart=unless-stopped \
   -p 8080:8080 \
@@ -26,9 +29,14 @@ podman run -d \
 ```
 
 - Pick a host port that's free on that box (8080 shown; adjust if taken).
-- The volume persists config so your edits in Step 2 survive restarts.
+- The named volume `searxng-config` persists config so your Step 2 edits survive restarts.
 - `--restart=unless-stopped` sets the restart policy (needed for Step 1b below).
 - `docker run` is identical if you're on Docker instead of podman.
+
+> Consistency matters: because you created this container with `sudo`, you must **always**
+> use `sudo` for `podman ps`, `podman exec`, `podman restart`, etc. A plain `podman ps`
+> (rootless) will show an empty list and make it look like the container vanished — it
+> didn't, you're just looking at a different storage namespace.
 
 ### Step 1b — Make the container survive a host reboot
 
@@ -41,18 +49,10 @@ podman-restart systemd service:
 sudo systemctl enable --now podman-restart.service
 ```
 
-This service starts (on boot) every container that has a `--restart` policy of `always` or
-`unless-stopped`. Without it, SearXNG stays down after the server reboots until you manually
-start it.
-
-> Note: `podman-restart.service` is a **system** service and covers containers run as root.
-> If you're running SearXNG as a **rootless** user, enable the user-scoped equivalent and
-> keep the session alive across logout instead:
-> ```bash
-> systemctl --user enable --now podman-restart.service
-> sudo loginctl enable-linger $USER
-> ```
-> `enable-linger` is what lets rootless containers start at boot without you logging in.
+This **system** service starts, on boot, every rootful container with a `--restart` policy
+of `always` or `unless-stopped`. Since we're running rootful (Step 1), this is exactly the
+right service — no user-scoped service or `enable-linger` needed. Without it, SearXNG stays
+down after the server reboots until you manually start it.
 
 ---
 
@@ -62,8 +62,54 @@ start it.
 everything will look configured but every search silently fails.** This is the #1 thing
 people miss.
 
-Edit `settings.yml` in the config volume (first launch creates it). Find the `search:`
-section and add `json` to `formats`:
+### 2a — Find where the config actually lives
+
+On first launch, SearXNG writes a default `settings.yml` into the `searxng-config` volume.
+Because it's a *named volume* (not a bind mount to a path you chose), it lives in podman's
+storage, not at an obvious location. Find the real host path:
+
+```bash
+sudo podman volume inspect searxng-config
+```
+
+Look at the **`Mountpoint`** field. For **rootful** podman it will be:
+
+```
+/var/lib/containers/storage/volumes/searxng-config/_data
+```
+
+So your config file is:
+
+```
+/var/lib/containers/storage/volumes/searxng-config/_data/settings.yml
+```
+
+> If `settings.yml` isn't there yet, the container hasn't finished first-run init. Give it a
+> few seconds after `podman run`, or check `sudo podman logs searxng`.
+
+### 2b — Edit settings.yml
+
+Two equally valid ways — pick one.
+
+**Option A — edit on the host directly (simplest for rootful):**
+
+```bash
+sudo nano /var/lib/containers/storage/volumes/searxng-config/_data/settings.yml
+```
+
+**Option B — edit inside the container** (if you prefer not to touch storage paths):
+
+```bash
+sudo podman exec -it searxng sh
+# then inside: vi /etc/searxng/settings.yml   (nano may not be installed)
+```
+
+Both point at the same file — `/etc/searxng/settings.yml` *inside* the container is the same
+bytes as the `_data/settings.yml` path *on the host*, because the volume is mounted there.
+
+### 2c — Make these two changes
+
+Find the `search:` section and add `json` to `formats` (this is the fix that matters):
 
 ```yaml
 search:
@@ -72,22 +118,20 @@ search:
     - json
 ```
 
-While you're in there, set a unique `secret_key` (SearXNG warns if it's default):
+And set a unique `secret_key` under `server:` (SearXNG warns loudly if left default):
 
 ```yaml
 server:
   secret_key: "change-me-to-something-random"
 ```
 
-Restart the container so it picks up the change:
+### 2d — Restart to apply
 
 ```bash
-podman restart searxng
+sudo podman restart searxng
 ```
 
-> Config file location depends on the image, commonly `/etc/searxng/settings.yml` inside the
-> container. `podman exec -it searxng sh` to poke around, or edit via the mounted volume on
-> the host.
+Config changes are only read at startup, so this restart is required for them to take effect.
 
 ---
 
@@ -223,13 +267,16 @@ unreliable for daily work. Self-hosting (above) is the real answer.
 ## Quick reference
 
 ```bash
-# On the server:
-podman run -d --name searxng --restart=unless-stopped -p 8080:8080 \
+# On the server (rootful — use sudo for ALL podman commands):
+sudo podman run -d --name searxng --restart=unless-stopped -p 8080:8080 \
   -v searxng-config:/etc/searxng:z docker.io/searxng/searxng:latest
 sudo systemctl enable --now podman-restart.service   # survive host reboots
-# (rootless instead: systemctl --user enable --now podman-restart.service
-#                    sudo loginctl enable-linger $USER)
-# edit settings.yml -> search.formats: add json -> podman restart searxng
+
+# Find + edit config (path from: sudo podman volume inspect searxng-config):
+sudo nano /var/lib/containers/storage/volumes/searxng-config/_data/settings.yml
+#   search.formats: add  - json
+#   server.secret_key: set something random
+sudo podman restart searxng
 
 # From the laptop (must return JSON):
 curl "http://<SERVER-IP>:8080/search?q=test&format=json"
