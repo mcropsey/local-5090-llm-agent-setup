@@ -59,8 +59,8 @@ down after the server reboots until you manually start it.
 ## Step 2 — Enable the JSON API (THE critical gotcha)
 
 **SearXNG ships with only HTML output enabled. The MCP needs JSON. If you skip this,
-everything will look configured but every search silently fails.** This is the #1 thing
-people miss.
+every search returns HTTP 403 Forbidden** — not a silent failure, but also not an obvious
+"enable JSON" error message. This is the #1 thing people miss.
 
 ### 2a — Find where the config actually lives
 
@@ -72,17 +72,17 @@ storage, not at an obvious location. Find the real host path:
 sudo podman volume inspect searxng-config
 ```
 
-Look at the **`Mountpoint`** field. For **rootful** podman it will be:
+Look at the **`Mountpoint`** field. For **rootful** podman it will be under
+`/var/lib/containers/storage/volumes/`. The exact subdirectory name matches whatever you
+passed to `-v` at `podman run` time — it's not always `searxng-config`. For example, if
+you ran `-v searxng:/etc/searxng`, the path is:
 
 ```
-/var/lib/containers/storage/volumes/searxng-config/_data
+/var/lib/containers/storage/volumes/searxng/_data/settings.yml
 ```
 
-So your config file is:
-
-```
-/var/lib/containers/storage/volumes/searxng-config/_data/settings.yml
-```
+Always use `sudo podman volume inspect <volume-name>` to get the exact path rather than
+guessing — the volume name varies by how the container was originally launched.
 
 > If `settings.yml` isn't there yet, the container hasn't finished first-run init. Give it a
 > few seconds after `podman run`, or check `sudo podman logs searxng`.
@@ -155,7 +155,8 @@ Don't proceed until this curl returns JSON. Every downstream problem traces back
 
 ## Step 4 — Register the MCP in opencode
 
-Edit `~/.config/opencode/opencode.json` on the laptop. Add the `mcp` block (keep any existing
+Edit `~/.config/opencode/config.json` on the laptop. **Note: the file is `config.json`, not
+`opencode.json`** — many guides show the wrong name. Add the `mcp` block (keep any existing
 config like your LM Studio provider — just add alongside).
 
 ```json
@@ -255,7 +256,7 @@ unreliable for daily work. Self-hosting (above) is the real answer.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| curl returns HTML not JSON | JSON format not enabled | Step 2 — add `json` to `search.formats`, restart |
+| curl returns HTTP 403 Forbidden | JSON format not enabled | Step 2 — add `json` to `search.formats`, restart |
 | curl connection refused/timeout | firewall / container binding | Open 8080 inbound; publish to LAN interface |
 | MCP tool never appears in opencode | wrong config schema | Use `mcp`/`type:local`/`command` array, not `mcpServers` |
 | MCP loads but searches fail | `SEARXNG_URL` wrong or unreachable from laptop | Re-run the Step 3 curl from the laptop |
@@ -281,7 +282,7 @@ sudo podman restart searxng
 # From the laptop (must return JSON):
 curl "http://<SERVER-IP>:8080/search?q=test&format=json"
 
-# opencode.json  -> mcp.searxng  (SEARXNG_URL = http://<SERVER-IP>:8080)
+# ~/.config/opencode/config.json  -> mcp.searxng  (SEARXNG_URL = http://<SERVER-IP>:8080)
 # AGENTS.md      -> "When to search the web" rule
 # restart opencode, then: "Search the web for <current thing> and quote it."
 ```
