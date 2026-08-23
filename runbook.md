@@ -163,9 +163,11 @@ sudo podman run -d \
   --name searxng \
   --restart=unless-stopped \
   -p 8080:8080 \
-  -v searxng-config:/etc/searxng:z \
+  -v searxng:/etc/searxng:z \
   docker.io/searxng/searxng:latest
 ```
+
+> **Volume name is `searxng`**, not `searxng-config`. Using the wrong name creates a second orphan volume and leaves the config empty.
 
 ### 3b — Survive reboots
 
@@ -175,17 +177,30 @@ Unlike Docker, podman's `--restart` flag alone does **not** replay containers af
 sudo systemctl enable --now podman-restart.service
 ```
 
+`podman-restart.service` starts all containers whose restart policy is `always` or `unless-stopped` (it filters on `should-start-on-boot=true`, which podman sets automatically for both of those policies).
+
+**Verify it is enabled:**
+```bash
+systemctl is-enabled podman-restart.service   # should print: enabled
+systemctl is-active  podman-restart.service   # should print: active
+```
+
 ### 3c — Enable JSON output (the critical gotcha)
 
 SearXNG ships with only HTML output. The MCP needs JSON. Skip this and every search returns HTTP 403 — no obvious error message.
 
 Find the config path:
 ```bash
-sudo podman volume inspect searxng-config
-# look at the Mountpoint field
+sudo podman volume inspect searxng --format '{{.Mountpoint}}'
+# returns: /var/lib/containers/storage/volumes/searxng/_data
 ```
 
-Edit settings.yml at that path (typically `/var/lib/containers/storage/volumes/searxng-config/_data/settings.yml`):
+Edit `settings.yml` at that path:
+```bash
+sudo vi /var/lib/containers/storage/volumes/searxng/_data/settings.yml
+```
+
+Ensure these blocks are present:
 ```yaml
 search:
   formats:
@@ -193,7 +208,8 @@ search:
     - json
 
 server:
-  secret_key: "change-me-to-something-random"
+  secret_key: "replace-with-something-random"   # change from the default
+  image_proxy: true
 ```
 
 Then restart:
@@ -225,6 +241,21 @@ Should point at `ihor-sokoliuk/mcp-searxng` on GitHub (not a typosquat). To lock
 ```json
 "command": ["npx", "-y", "mcp-searxng@1.0.0"]
 ```
+
+---
+
+## LM Studio reboot note (5090 box — Windows)
+
+LM Studio does not auto-start the local server after a Windows reboot. After any reboot of the 5090 box:
+
+1. Open LM Studio
+2. Load the model (Discover → **Qwen3-Coder-30B-A3B** → Load with 64k context, FlashAttn ON, Q8 KV)
+3. Developer → Local Server → toggle **Status: Running**
+4. Verify from the laptop: `curl http://192.168.1.194:1234/v1/models`
+
+> LM Studio has a **Launch at Login** option (Settings → General) but it only opens the GUI — it does not automatically reload the model or start the server. The server start is always manual after a reboot.
+
+**If you want the server to come up automatically**, create a Windows Task Scheduler task that runs on logon and calls the LM Studio CLI with your saved preset — but LM Studio's CLI support for this is limited. Simplest path for now: treat the 5090 as a manual step after any reboot.
 
 ---
 
@@ -422,9 +453,9 @@ sudo podman stop --all
 sudo podman system renumber
 
 # SearXNG container management (all with sudo):
-sudo podman ps                   # verify it's Up
+sudo podman ps                                                  # verify it's Up
 sudo podman restart searxng
-sudo podman volume inspect searxng-config   # find settings.yml path
+sudo podman volume inspect searxng --format '{{.Mountpoint}}'  # settings.yml lives here/_data/
 ```
 
 | File | Path | Purpose |

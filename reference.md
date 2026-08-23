@@ -156,10 +156,23 @@ Consequences:
 
 ---
 
+## Verified current state (2026-08-22)
+
+| Component | Host | Status | Notes |
+|---|---|---|---|
+| SearXNG container | .101 | ✅ Up (2 days, RestartCount=0) | Volume: `searxng`, JSON enabled, secret_key set |
+| podman-restart.service | .101 | ✅ enabled + active | Survives reboot — covers `unless-stopped` policy |
+| mcp-heartbeat.service | .98 | ✅ enabled + active | Noname MCP session |
+| mcp-sweep.service | .98 | ✅ enabled + active | Noname MCP session |
+| LM Studio server | 5090 (.194) | ⚠ Manual start required | Not running at time of check — requires manual start after every Windows reboot |
+
+---
+
 ## Open items
 
 | Item | Notes |
 |---|---|
+| LM Studio auto-start | Server does not start automatically after Windows reboot — manual step every time. Windows Task Scheduler could automate this but LM Studio CLI support is limited. |
 | aws-docs MCP | `awslabs.aws-documentation-mcp-server@latest` — add alongside searxng in config.json |
 | Qdrant RAG | Local RAG over `~/lab-kb` using `nomic-embed-text-v1.5` (already in LM Studio). Closes the "your own infra" grounding gap. Add after web search is solid. |
 | Frontier hybrid | Anthropic provider in config.json as escape hatch for hard tasks. Template in runbook. |
