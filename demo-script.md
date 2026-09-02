@@ -149,7 +149,7 @@ curl http://192.168.1.194:1234/v1/models
 **This is the part you flagged as "take a look at this" — give it the time.**
 
 Walk the rules on screen:
-- **`"allow"`** (runs silently): ssh, scp, systemctl, journalctl, kubectl, helm, minikube, kind, k3s, curl, wget — the things you need for remote work and Kubernetes.
+- **`"allow"`** (runs silently): ssh, scp, systemctl, journalctl, kubectl, helm, minikube, kind, k3s, curl, wget — remote work and Kubernetes. Plus: dnf/apt read commands (list, search, info, repolist), `sudo dnf/apt install`, repo setup (`sudo tee /etc/yum.repos.d/*`, apt keyrings), binary drop-ins (`sudo install`, `sudo mv/chmod +x /usr/local/bin/*`), git clone/ls-remote, and gh CLI read operations.
 - **`"ask"`** (confirmation dialog): docker, podman, npm, pip, brew, aws — package managers and mutation-heavy tools stay gated.
 - `*` (catch-all) → **ask** — anything not explicitly listed also asks.
 - You start conservative; loosen individual entries when friction outweighs the risk. Don't flip `"*"` to allow.

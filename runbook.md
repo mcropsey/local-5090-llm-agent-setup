@@ -106,6 +106,13 @@ Follow this top to bottom on a fresh machine. Three machines involved:
        }
      },
      "mcp": {
+       "crapi": {
+         "type": "remote",
+         "url": "http://192.168.1.102:8009/mcp/",
+         "headers": {
+           "Authorization": "Basic bWlrZTFAbXkubGFiOk15bGFiMTIzIQ=="
+         }
+       },
        "searxng": {
          "type": "local",
          "command": ["npx", "-y", "mcp-searxng"],
@@ -139,7 +146,38 @@ Follow this top to bottom on a fresh machine. Three machines involved:
          "go install *": "ask",
          "curl *": "allow",
          "wget *": "allow",
-         "aws *": "ask"
+         "aws *": "ask",
+         "sudo tee /etc/yum.repos.d/*": "allow",
+         "sudo tee /etc/apt/sources.list.d/*": "allow",
+         "sudo tee /etc/apt/keyrings/*": "allow",
+         "sudo mkdir -p /etc/apt/keyrings*": "allow",
+         "sudo rpm --import *": "allow",
+         "dnf list*": "allow",
+         "dnf search *": "allow",
+         "dnf info *": "allow",
+         "dnf repolist*": "allow",
+         "sudo dnf *install*": "allow",
+         "sudo dnf makecache*": "allow",
+         "sudo dnf check-update*": "allow",
+         "sudo dnf repolist*": "allow",
+         "sudo dnf list*": "allow",
+         "apt-cache *": "allow",
+         "apt list*": "allow",
+         "sudo apt-get update*": "allow",
+         "sudo apt-get *install*": "allow",
+         "sudo apt update*": "allow",
+         "sudo apt *install*": "allow",
+         "sudo install -o root -g root -m *": "allow",
+         "sudo install -m *": "allow",
+         "sudo mv * /usr/local/bin/*": "allow",
+         "sudo chmod +x /usr/local/bin/*": "allow",
+         "git clone *": "allow",
+         "git ls-remote *": "allow",
+         "gh search *": "allow",
+         "gh repo clone *": "allow",
+         "gh repo view *": "allow",
+         "gh repo list*": "allow",
+         "gh api *": "allow"
        }
      }
    }
