@@ -149,9 +149,10 @@ curl http://192.168.1.194:1234/v1/models
 **This is the part you flagged as "take a look at this" — give it the time.**
 
 Walk the rules on screen:
-- Everything is `"ask"` — ssh, scp, systemctl, journalctl, docker, podman, kubectl, helm, brew, pip, npm, curl, wget, aws — every command stops and asks before running.
+- **`"allow"`** (runs silently): ssh, scp, systemctl, journalctl, kubectl, helm, minikube, kind, k3s, curl, wget — the things you need for remote work and Kubernetes.
+- **`"ask"`** (confirmation dialog): docker, podman, npm, pip, brew, aws — package managers and mutation-heavy tools stay gated.
 - `*` (catch-all) → **ask** — anything not explicitly listed also asks.
-- Flip individual entries to `"allow"` if you trust a command class to run silently. Start conservative; loosen per command class when the friction outweighs the risk.
+- You start conservative; loosen individual entries when friction outweighs the risk. Don't flip `"*"` to allow.
 
 **Two things to say:**
 1. > "This is where you decide what the agent can do on its own and what stops and asks you. I decided that ahead of time, in a file, while I was calm."

@@ -117,17 +117,17 @@ Follow this top to bottom on a fresh machine. Three machines involved:
      "permission": {
        "bash": {
          "*": "ask",
-         "ssh *": "ask",
-         "scp *": "ask",
-         "systemctl *": "ask",
-         "journalctl *": "ask",
+         "ssh *": "allow",
+         "scp *": "allow",
+         "systemctl *": "allow",
+         "journalctl *": "allow",
          "docker *": "ask",
          "podman *": "ask",
-         "kubectl *": "ask",
-         "helm *": "ask",
-         "minikube *": "ask",
-         "kind *": "ask",
-         "k3s *": "ask",
+         "kubectl *": "allow",
+         "helm *": "allow",
+         "minikube *": "allow",
+         "kind *": "allow",
+         "k3s *": "allow",
          "brew *": "ask",
          "pip *": "ask",
          "pip3 *": "ask",
@@ -137,8 +137,8 @@ Follow this top to bottom on a fresh machine. Three machines involved:
          "pnpm *": "ask",
          "cargo *": "ask",
          "go install *": "ask",
-         "curl *": "ask",
-         "wget *": "ask",
+         "curl *": "allow",
+         "wget *": "allow",
          "aws *": "ask"
        }
      }
@@ -148,7 +148,7 @@ Follow this top to bottom on a fresh machine. Three machines involved:
    Config notes:
    - File is **`config.json`**, not `opencode.json` — many guides are wrong.
    - MCP schema is `mcp` / `type: "local"` / `command` as an **array**. The generic `mcpServers` + `command`/`args` shape won't load.
-   - Every entry is `"ask"` — opencode shows a confirmation dialog before every bash command. You see the exact call, approve or deny. Flip individual entries to `"allow"` to let them run silently (e.g. `journalctl *` is low-risk; `aws *` and `kubectl *` are not).
+   - `"allow"` runs silently; `"ask"` shows a confirmation dialog. The defaults above allow ssh, scp, systemctl, journalctl, kubectl, helm, k8s tools, curl, and wget. Package managers (npm, pip, brew), docker/podman, and aws remain `"ask"` — adjust as needed.
    - The `mcp.searxng` block is already included. SearXNG setup is Phase 3.
 
 5. **Verify opencode connects**
