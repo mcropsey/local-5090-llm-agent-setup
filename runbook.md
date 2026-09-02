@@ -117,13 +117,28 @@ Follow this top to bottom on a fresh machine. Three machines involved:
      "permission": {
        "bash": {
          "*": "ask",
-         "ssh *": "allow",
-         "scp *": "allow",
-         "systemctl *": "allow",
-         "journalctl *": "allow",
-         "docker *": "allow",
-         "podman *": "allow",
+         "ssh *": "ask",
+         "scp *": "ask",
+         "systemctl *": "ask",
+         "journalctl *": "ask",
+         "docker *": "ask",
+         "podman *": "ask",
          "kubectl *": "ask",
+         "helm *": "ask",
+         "minikube *": "ask",
+         "kind *": "ask",
+         "k3s *": "ask",
+         "brew *": "ask",
+         "pip *": "ask",
+         "pip3 *": "ask",
+         "npm *": "ask",
+         "npx *": "ask",
+         "yarn *": "ask",
+         "pnpm *": "ask",
+         "cargo *": "ask",
+         "go install *": "ask",
+         "curl *": "ask",
+         "wget *": "ask",
          "aws *": "ask"
        }
      }
@@ -133,8 +148,7 @@ Follow this top to bottom on a fresh machine. Three machines involved:
    Config notes:
    - File is **`config.json`**, not `opencode.json` — many guides are wrong.
    - MCP schema is `mcp` / `type: "local"` / `command` as an **array**. The generic `mcpServers` + `command`/`args` shape won't load.
-   - `"*": "ask"` — opencode shows a confirmation dialog before every bash command. You see the exact call, approve or deny.
-   - `"allow"` entries — SSH, podman, docker run without prompting. Keep `aws` and `kubectl` on `"ask"` (destructive/costly).
+   - Every entry is `"ask"` — opencode shows a confirmation dialog before every bash command. You see the exact call, approve or deny. Flip individual entries to `"allow"` to let them run silently (e.g. `journalctl *` is low-risk; `aws *` and `kubectl *` are not).
    - The `mcp.searxng` block is already included. SearXNG setup is Phase 3.
 
 5. **Verify opencode connects**
