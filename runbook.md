@@ -33,6 +33,14 @@ Follow this top to bottom on a fresh machine. Three machines involved:
 4. **Enable LAN access**
    Gear icon → **Serve on Local Network: ON**. Leave Require Authentication OFF (LAN only — revisit before any external exposure).
 
+   **Load exactly one model, and turn JIT loading OFF** (or cap max loaded models at 1).
+   A 32 GB 5090 fits one 30B-A3B at 64k context (~21 GB) and nothing else. A second
+   resident model spills the whole thing to system RAM and drops you from ~65 tok/s to
+   ~1 tok/s, which presents as opencode hanging. JIT is also what silently loads a
+   *duplicate* of the same model: opencode issues its title-generation call concurrently
+   with the main call at session start, and JIT answers the second one by loading another
+   full copy. See `G7` in `reference.md`.
+
 5. **Verify from the laptop**
    ```bash
    curl http://192.168.1.194:1234/v1/models
@@ -98,7 +106,7 @@ Follow this top to bottom on a fresh machine. Three machines involved:
              "name": "Qwen3-Coder 30B-A3B",
              "tools": true,
              "limit": {
-               "context": 65536,
+               "context": 65280,
                "output": 8192
              }
            }
@@ -106,88 +114,51 @@ Follow this top to bottom on a fresh machine. Three machines involved:
        }
      },
      "mcp": {
-       "crapi": {
-         "type": "remote",
-         "url": "http://192.168.1.102:8009/mcp/",
-         "headers": {
-           "Authorization": "Basic bWlrZTFAbXkubGFiOk15bGFiMTIzIQ=="
-         }
-       },
        "searxng": {
          "type": "local",
          "command": ["npx", "-y", "mcp-searxng"],
          "environment": {
            "SEARXNG_URL": "http://192.168.1.101:8080"
-         }
+         },
+         "enabled": true
+       },
+       "noname": {
+         "type": "remote",
+         "url": "http://192.168.1.102:8013/mcp",
+         "enabled": false
+       },
+       "crapi": {
+         "type": "remote",
+         "url": "http://192.168.1.102:8009/mcp/",
+         "headers": {
+           "Authorization": "Basic bWlrZTFAbXkubGFiOk15bGFiMTIzIQ=="
+         },
+         "enabled": false
        }
      },
      "permission": {
-       "bash": {
-         "*": "ask",
-         "ssh *": "allow",
-         "scp *": "allow",
-         "systemctl *": "allow",
-         "journalctl *": "allow",
-         "docker *": "ask",
-         "podman *": "ask",
-         "kubectl *": "allow",
-         "helm *": "allow",
-         "minikube *": "allow",
-         "kind *": "allow",
-         "k3s *": "allow",
-         "brew *": "ask",
-         "pip *": "ask",
-         "pip3 *": "ask",
-         "npm *": "ask",
-         "npx *": "ask",
-         "yarn *": "ask",
-         "pnpm *": "ask",
-         "cargo *": "ask",
-         "go install *": "ask",
-         "curl *": "allow",
-         "wget *": "allow",
-         "aws *": "ask",
-         "sudo tee /etc/yum.repos.d/*": "allow",
-         "sudo tee /etc/apt/sources.list.d/*": "allow",
-         "sudo tee /etc/apt/keyrings/*": "allow",
-         "sudo mkdir -p /etc/apt/keyrings*": "allow",
-         "sudo rpm --import *": "allow",
-         "dnf list*": "allow",
-         "dnf search *": "allow",
-         "dnf info *": "allow",
-         "dnf repolist*": "allow",
-         "sudo dnf *install*": "allow",
-         "sudo dnf makecache*": "allow",
-         "sudo dnf check-update*": "allow",
-         "sudo dnf repolist*": "allow",
-         "sudo dnf list*": "allow",
-         "apt-cache *": "allow",
-         "apt list*": "allow",
-         "sudo apt-get update*": "allow",
-         "sudo apt-get *install*": "allow",
-         "sudo apt update*": "allow",
-         "sudo apt *install*": "allow",
-         "sudo install -o root -g root -m *": "allow",
-         "sudo install -m *": "allow",
-         "sudo mv * /usr/local/bin/*": "allow",
-         "sudo chmod +x /usr/local/bin/*": "allow",
-         "git clone *": "allow",
-         "git ls-remote *": "allow",
-         "gh search *": "allow",
-         "gh repo clone *": "allow",
-         "gh repo view *": "allow",
-         "gh repo list*": "allow",
-         "gh api *": "allow"
-       }
+       "bash": "ask"
      }
    }
    ```
 
    Config notes:
    - File is **`config.json`**, not `opencode.json` — many guides are wrong.
-   - MCP schema is `mcp` / `type: "local"` / `command` as an **array**. The generic `mcpServers` + `command`/`args` shape won't load.
-   - `"allow"` runs silently; `"ask"` shows a confirmation dialog. The defaults above allow ssh, scp, systemctl, journalctl, kubectl, helm, k8s tools, curl, and wget. Package managers (npm, pip, brew), docker/podman, and aws remain `"ask"` — adjust as needed.
-   - The `mcp.searxng` block is already included. SearXNG setup is Phase 3.
+   - MCP schema is `mcp` / `type: "local"` / `command` as an **array**. The generic
+     `mcpServers` + `command`/`args` shape won't load.
+   - **`"bash": "ask"` is the whole permission block.** It accepts a bare string, so you
+     don't need per-command patterns. Every command prompts — including `sudo`, `rm`,
+     anything — and nothing is pre-approved or blocked. This replaced a 57-line pattern
+     list; the patterns were never sent to the model and cost nothing in tokens, but they
+     were easy to get subtly wrong and hard to audit. Approve at the prompt instead.
+   - `"context": 65280`, not 65536. LM Studio reports `loaded_context_length: 65280` when
+     you ask for 64k, and opencode uses this number to decide when to compact. Setting it
+     256 tokens too high means requests at the top of the window get rejected with
+     `Internal Server Error` — see `G8` in `reference.md`.
+   - **`searxng` is enabled; `noname` and `crapi` ship disabled.** Those two add 68 tool
+     definitions and ~8,000 prompt tokens to *every* request. Flip `enabled` to `true`
+     when doing API security work, then back to `false`. Full instructions and measured
+     costs: `mcp-servers.md`.
 
 5. **Verify opencode connects**
    ```bash
@@ -198,6 +169,194 @@ Follow this top to bottom on a fresh machine. Three machines involved:
    Ask it: `"List the files in this directory."` — it should **run the tool** and return actual output, not hallucinate a file list.
 
    If you get `exceeds the available context size (8192 tokens)` → go back to LM Studio and set context to 64k, then reload the model.
+
+---
+
+## Switching models — and why loading one in LM Studio isn't enough
+
+**Loading a model in LM Studio does not make opencode use it.** opencode only ever requests
+the model IDs declared in its `provider.local5090.models` block, and it defaults to
+`config.json`'s top-level `"model"`. Load DeepSeek in the GUI, and opencode still asks for
+`qwen3-coder-30b-a3b-instruct` — LM Studio then has to JIT-load Qwen *alongside* DeepSeek,
+which on a 32 GB card can fail outright:
+
+```
+HTTP 400  Failed to load model "qwen3-coder-30b-a3b-instruct".
+          Error: Engine protocol startup was aborted.
+```
+
+That 400 is what "opencode won't connect" actually looks like. Observed on this stack —
+and it's intermittent, because it depends on what else is resident at that moment.
+
+To actually switch models you must declare the model, then select it:
+
+Every tool-capable model on the box, as currently configured:
+
+```json
+"model": "local5090/qwen/qwen3.6-27b",
+...
+"models": {
+  "qwen/qwen3.6-27b": {
+    "name": "Qwen3.6 27B (default)",
+    "tools": true,
+    "limit": { "context": 65280, "output": 8192 }
+  },
+  "qwen3-coder-30b-a3b-instruct": {
+    "name": "Qwen3-Coder 30B-A3B",
+    "tools": true,
+    "limit": { "context": 65280, "output": 8192 }
+  },
+  "qwen/qwen3-coder-next": {
+    "name": "Qwen3-Coder Next",
+    "tools": true,
+    "limit": { "context": 65280, "output": 8192 }
+  },
+  "devstral-small-2-24b-instruct-2512": {
+    "name": "Devstral Small 2 24B",
+    "tools": true,
+    "limit": { "context": 65280, "output": 8192 }
+  },
+  "qwen3-30b-a3b-thinking-2507": {
+    "name": "Qwen3 30B-A3B Thinking",
+    "tools": true,
+    "limit": { "context": 65280, "output": 8192 }
+  },
+  "openai/gpt-oss-20b": {
+    "name": "GPT-OSS 20B",
+    "tools": true,
+    "limit": { "context": 65280, "output": 8192 }
+  }
+}
+```
+
+`limit.context` is `65280` for all six because that's what LM Studio reports when loaded
+at 64k. **It is a per-model claim, not a global one** — if you load one of these at a
+different context, fix its entry or you get the `G8` overrun.
+
+Then pick it, three ways:
+
+| How | Command / key | Scope |
+|---|---|---|
+| Default | top-level `"model": "local5090/<id>"` in config.json | every session |
+| Per session | `opencode -m local5090/<id>` | that launch only |
+| Mid-session | `ctrl+alt+m` (model list), `ctrl+alt+.` (cycle recent) | that session |
+
+The two keybinds are bound in `~/.config/opencode/tui.json` — opencode ships the
+`model_list` / `model_cycle_recent` actions with **no default key**, so they do nothing
+until you bind them.
+
+Confirm opencode can actually see a model before launching the TUI:
+
+```bash
+opencode models local5090
+```
+
+**If it isn't in that list, opencode cannot use it — full stop.** There is no
+auto-discovery of LM Studio's loaded models; the `models` block in config.json is the
+complete universe of what opencode will request. This is the single most common reason
+"I loaded it but opencode won't use it."
+
+> **Use the model's full ID, publisher prefix included.** A slash in the ID is fine —
+> opencode splits `provider/model` on the *first* slash only, so
+> `local5090/qwen/qwen3.6-27b` resolves correctly (verified with `opencode models`).
+>
+> **Do not "simplify" it by dropping the prefix.** LM Studio will answer a request for
+> the short `qwen3.6-27b` with HTTP 200, which makes the shortcut look safe — but it
+> treats the short name as a *separate model* and JIT-loads a second copy at the **8192
+> default context**, not your 64k. Both then sit in VRAM:
+>
+> ```
+> qwen/qwen3.6-27b    loaded_ctx=65280   ← the one you configured
+> qwen3.6-27b         loaded_ctx=8192    ← duplicate from the short name
+> ```
+>
+> That's a silent `G3` (8k context) stacked on a `G7` (VRAM oversubscription), from a
+> config that looks like it works. Match the ID from `/api/v0/models` exactly.
+
+### Which models on the 5090 can actually drive the harness
+
+opencode is tool-driven, so `tool_use` is non-negotiable. Ask LM Studio rather than
+guessing — it publishes capabilities per model:
+
+```bash
+curl -s http://192.168.1.194:1234/api/v0/models | python3 -c "
+import json,sys
+for m in json.load(sys.stdin)['data']:
+    if m.get('type')=='embeddings': continue
+    caps=m.get('capabilities') or []
+    print(f\"{m['id']:42s} {'tool_use OK' if 'tool_use' in caps else 'no tool_use'}\")
+"
+```
+
+Current inventory on this box:
+
+All six tool-capable models are declared in config.json. The three without `tool_use` are
+deliberately left out and are being deleted from the box.
+
+| Model | Tool use | In config | Notes |
+|---|---|---|---|
+| `qwen/qwen3.6-27b` | ✅ | ✅ | **Current default.** VLM, ~19 GB at 64k |
+| `qwen3-coder-30b-a3b-instruct` | ✅ | ✅ | Previous default; ~21 GB at 64k |
+| `qwen/qwen3-coder-next` | ✅ | ✅ | Untested here |
+| `devstral-small-2-24b-instruct-2512` | ✅ | ✅ | The A/B candidate in Open items |
+| `qwen3-30b-a3b-thinking-2507` | ✅ | ✅ | Reasoning variant — expect the token burn described below |
+| `openai/gpt-oss-20b` | ✅ | ✅ | Smallest; leaves real VRAM headroom |
+| `deepseek/deepseek-r1-0528-qwen3-8b` | ❌ | — | Can't tool-call — see below. Deleting |
+| `ibm/granite-3.2-8b` | ❌ | — | No capabilities declared. Deleting |
+| `qwen/qwen2.5-coder-32b` | ❌ | — | No capabilities declared. Deleting |
+
+Capability metadata is only populated once a model has been loaded at least once, so a
+never-loaded model may report nothing until you load it. Treat "no capabilities" on a
+never-loaded model as unknown, not as a definite ❌.
+
+Verify the whole set resolves through opencode, not just LM Studio:
+
+```bash
+opencode models local5090     # must list all six
+```
+
+### Don't use DeepSeek-R1-8B as the driver model
+
+It cannot make tool calls, which is the one thing the harness needs. Same prompt, same
+tool definition, measured side by side:
+
+| Model | `finish_reason` | `tool_calls` | Reasoning tokens |
+|---|---|---|---|
+| qwen3-coder-30b-a3b | `tool_calls` | **1** — `bash({"command":"ls -la"})` | 0 |
+| deepseek-r1-0528-qwen3-8b | `stop` | **0** | 1,139 |
+
+DeepSeek answered by *typing* a markdown fence — <code>```bash ls ```</code> — as ordinary
+text instead of emitting a structured call. LM Studio confirms this in its model metadata:
+Qwen advertises `capabilities: ["tool_use"]`, DeepSeek declares no capabilities at all.
+
+Two more things make it a poor fit:
+
+- **It burns the output budget thinking.** At `max_tokens: 200` it spent 198 tokens
+  reasoning and returned `content: ""` with `finish_reason: "length"` — a blank reply. It
+  needed ~380 tokens just to answer "what is 2+2?".
+- **Its answer lands in the wrong field.** Reasoning models put text in
+  `reasoning_content`, which is a DeepSeek/LM Studio extension that
+  `@ai-sdk/openai-compatible` doesn't read. opencode sees `content: ""` and displays
+  nothing — the `G6` "thinks, emits nothing" symptom, from the model rather than the
+  chat template.
+
+Keep DeepSeek for one-off reasoning questions you ask it directly. Leave Qwen3-Coder as
+the harness driver.
+
+### Turn off JIT loading and idle auto-unload
+
+LM Studio ships with both on, and together they cause the two weirdest symptoms on this
+stack:
+
+| Setting | Symptom when left on |
+|---|---|
+| **JIT model loading** | Models load that you never asked for — *any* API request naming an unloaded model triggers a load. This is what creates the duplicate `qwen3-coder-30b-a3b-instruct:2` instance and what oversubscribes VRAM (`G7`). |
+| **Idle TTL auto-unload** | Models silently unload after inactivity. The next opencode request pays a 30–90 s cold load from disk before the first token — indistinguishable from a hang. |
+
+Settings → Developer → turn off **Just-In-Time model loading** and set the **idle TTL** to
+off (or cap **max loaded models** at 1). Then load Qwen3-Coder once, manually, and leave it
+resident. Load state becomes something you control instead of a side effect of whatever
+last hit the API.
 
 ---
 

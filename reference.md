@@ -2,6 +2,10 @@
 
 Read this when something breaks or you want to understand why a decision was made.
 For step-by-step build instructions, see `runbook.md`.
+For turning MCP servers on and off, see `mcp-servers.md`.
+
+Start at **Latency triage** if the symptom is "opencode is hanging" — that's the most
+common report and it's almost always the 5090, not the config.
 
 ---
 
@@ -22,11 +26,20 @@ For step-by-step build instructions, see `runbook.md`.
 │                            │      │                                │
 │  LM Studio :1234           │      │  SearXNG container :8080       │
 │  OpenAI-compatible /v1     │      │  rootful podman                │
-│                            │      │  + crAPI stack, Noname sensor  │
-│  Qwen3-Coder-30B-A3B       │      │                                │
-│  Q4_K_M · 64k ctx          │      │  SearXNG → Google/Bing/DDG     │
-│  FlashAttn · Q8 KV         │      │  over HTTPS (public)           │
+│                            │      │                                │
+│  Qwen3-Coder-30B-A3B       │      │  SearXNG → Google/Bing/DDG     │
+│  Q4_K_M · 64k ctx          │      │  over HTTPS (public)           │
+│  FlashAttn · Q8 KV         │      │                                │
 └────────────────────────────┘      └────────────────────────────────┘
+
+             │ HTTP :8009 / :8013  (MCP — disabled by default)
+             ▼
+┌──────────────────────────────────────┐
+│  MCP HOST — 192.168.1.102            │
+│  crapi   MCP :8009/mcp/   29 tools   │
+│  noname  MCP :8013/mcp    39 tools   │
+│  both "enabled": false               │
+└──────────────────────────────────────┘
 ```
 
 ### Component roles
@@ -55,9 +68,9 @@ You ──► opencode ──► builds system prompt (base + tool defs + AGENTS
                      tool_call: bash("ssh mcropsey@... podman ps")
                           │
                           ▼
-                     permission gate (config.json permission block)
-                     ├── matches "allow" pattern → run silently
-                     └── matches "*": "ask"    → confirmation dialog → you approve
+                     permission gate (config.json → "bash": "ask")
+                     └── every command → confirmation dialog → you approve
+                         (nothing pre-approved, nothing blocked)
                           │
                           ▼
                      execute on target (.101 / AWS / local)
@@ -83,7 +96,20 @@ Two files do different jobs:
 | `config.json` | What the harness **can** do — provider endpoint, MCP servers, permission rules | opencode start |
 | `AGENTS.md` | What the model **will** do — triggers, guardrails, lab context | Session start (injected into system prompt) |
 
-**Capability and trigger are separate — you need both.** The MCP block in config.json gives the model a search tool. The AGENTS.md rule makes it reach for one. Same pattern for sudo: the permission block allows it, the AGENTS.md line makes the model call it instead of explaining it.
+**Capability and trigger are separate — you need both.** The MCP block in config.json gives the model a search tool. The AGENTS.md rule makes it reach for one. Same pattern for sudo: the permission gate lets it through once you approve, and the AGENTS.md line makes the model call it instead of explaining it.
+
+**Only one half of config.json costs tokens.** The two blocks behave completely differently:
+
+| Block | Sent to the model? | Cost per request |
+|---|---|---|
+| `permission` | **No** — evaluated locally by opencode before it executes a tool | 0 tokens |
+| `mcp` | **Yes** — every enabled server's full tool schema goes in the system prompt | ~2,000 tokens per small server, ~8,000 for noname + crapi |
+
+This is why `permission` collapsed to a single `"bash": "ask"` line with no loss: the
+pattern list was local policy the model never saw, so trimming it bought clarity, not
+speed. The `mcp` block is the opposite — it's the one that actually shows up in latency,
+so it's the one worth keeping short. See `mcp-servers.md` for the toggle and measured
+costs.
 
 **Order inside AGENTS.md is load-bearing.** Local models weight earlier instructions more heavily, and their built-in safety training competes with your file. As the file grows, a tool-access block buried at the bottom loses to the safety filter. SSH stopped working after the web-search section was appended — that's the documented regression.
 
@@ -123,6 +149,10 @@ G1  model dictates                              reload
 G4  claims success                              → wrong chat         → system
     without verifying                           template             renumber
     → verification rules
+G9  MCP schema bloat                        G7  multi-model VRAM
+    → disable unused                            thrash → unload
+      servers                               G8  ctx limit > real
+                                                → set 65280
 ```
 
 | # | Symptom | Fix |
@@ -134,8 +164,69 @@ G4  claims success                              → wrong chat         → syste
 | G4 | "The container is running" — it isn't | Verification block in AGENTS.md; end prompts with an explicit check command |
 | G5 | `acquiring lock 0 … file exists` | `podman rm -f <id>` → `stop --all` → `system renumber` |
 | G6 | Thinks, emits nothing | Wrong chat template in LM Studio for this GGUF; switch to model's native tool-use template |
+| G7 | **Every request crawls; opencode looks hung, you hit ESC** | Too many models resident on the 5090. Unload all but the one in use — see "Latency triage" below |
+| G8 | `AI_APICallError: Internal Server Error` on long sessions | `limit.context` set above LM Studio's real `loaded_context_length` (65280, not 65536) |
+| G9 | Trivial prompts are slow even on a healthy GPU | MCP tool-schema bloat — disable unused servers (`mcp-servers.md`) |
+| G10 | Loaded a different model in LM Studio, opencode won't connect (`400 Engine protocol startup was aborted`) | opencode still requests its configured model ID and JIT tries to load it alongside. Declare the new model and select it — see "Switching models" in `runbook.md` |
+| G11 | Models load/unload in LM Studio on their own | JIT loading + idle TTL are both on by default. Turn both off; load one model manually |
+| G12 | Model types <code>```bash ls ```</code> as text instead of running it | The model can't tool-call (DeepSeek-R1 declares no `tool_use` capability). Not a prompt problem — switch models |
 
 **G1 is the recurring one** — it's architectural, not a config regression. Your instructions and the model's training compete for the same prompt, and prompt length shifts who wins.
+
+---
+
+## Latency triage — "opencode is hanging"
+
+It is almost never hanging. It's waiting on the model, and there are only two real causes.
+Check them in this order, because the first one dwarfs the second.
+
+**1. Is the 5090 oversubscribed?** (G7 — this is the big one)
+
+```bash
+curl -s http://192.168.1.194:1234/api/v0/models | python3 -c "
+import json,sys
+for m in json.load(sys.stdin)['data']:
+    if m.get('state')=='loaded':
+        print(f\"{m['id']:38s} ctx={m.get('loaded_context_length')}\")
+"
+```
+
+If more than one model is loaded, that's the problem. VRAM math on a 32 GB card:
+
+| Loaded | Weights + KV | Fits? |
+|---|---|---|
+| Qwen3-Coder-30B-A3B alone | ~21 GB | ✅ |
+| + a 27B VLM | ~41 GB | ❌ spills to system RAM |
+| + a second 30B instance + an 8B | ~71 GB | ❌❌ hard CPU thrash |
+
+Anything past 32 GB runs on the CPU. Observed on this stack: **24 s to emit 8 tokens**
+with four models loaded, versus **65 tok/s and 0.03 s to first token** with one. That
+40× swing is the entire difference between "working" and "hung."
+
+Unload the extras in LM Studio (Developer → eject), and **turn off JIT model loading**
+(or cap max loaded models at 1). JIT is what silently created the duplicate
+`qwen3-coder-30b-a3b-instruct:2` instance: opencode fires its title-generation request
+concurrently with the main request at session start, and LM Studio answered the second
+one by loading a whole second copy of the model.
+
+**2. How big is the prompt before you've typed anything?** (G9)
+
+Ask opencode `what is 2x2?` and read `prompt_tokens`. With only searxng enabled it should
+be ~2,155. If it's ~10,000, `noname` and `crapi` are on — every request is carrying 68
+extra tool definitions. `mcp-servers.md` has the toggle.
+
+**What is *not* the cause:** the `permission` block and `AGENTS.md`. The permission rules
+never leave your laptop, and AGENTS.md is ~500 tokens. Neither is a latency lever —
+don't go trimming rules chasing speed.
+
+**Reading the logs.** `~/.local/share/opencode/log/opencode.log`:
+
+```bash
+grep -E "ERROR" ~/.local/share/opencode/log/opencode.log | tail -20
+```
+
+`error=Aborted` means *you* pressed ESC — it's a symptom, not a cause. Look for the
+`stream error` line above it for the real failure.
 
 ---
 
