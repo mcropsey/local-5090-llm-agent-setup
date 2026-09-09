@@ -193,11 +193,16 @@ To actually switch models you must declare the model, then select it:
 Every tool-capable model on the box, as currently configured:
 
 ```json
-"model": "local5090/qwen/qwen3.6-27b",
+"model": "local5090/qwen/qwen3.8-27b",
 ...
 "models": {
+  "qwen/qwen3.8-27b": {
+    "name": "Qwen3.8 27B (default)",
+    "tools": true,
+    "limit": { "context": 98304, "output": 8192 }
+  },
   "qwen/qwen3.6-27b": {
-    "name": "Qwen3.6 27B (default)",
+    "name": "Qwen3.6 27B",
     "tools": true,
     "limit": { "context": 65280, "output": 8192 }
   },
@@ -229,9 +234,23 @@ Every tool-capable model on the box, as currently configured:
 }
 ```
 
-`limit.context` is `65280` for all six because that's what LM Studio reports when loaded
-at 64k. **It is a per-model claim, not a global one** — if you load one of these at a
-different context, fix its entry or you get the `G8` overrun.
+`limit.context` is `65280` for the 64k-loaded entries because that's what LM Studio reports
+when you ask for 64k. **It is a per-model claim, not a global one** — if you load one of
+these at a different context, fix its entry or you get the `G8` overrun. Qwen3.8 is the
+live example: it is loaded at 96k, so its entry says `98304`. Read the number off the box
+rather than copying a neighbour's:
+
+```bash
+curl -s http://192.168.1.194:1234/api/v0/models | python3 -c "
+import json,sys
+for m in json.load(sys.stdin)['data']:
+    if m.get('state')=='loaded':
+        print(f\"{m['id']:38s} loaded_ctx={m.get('loaded_context_length')}\")
+"
+# qwen/qwen3.8-27b    loaded_ctx=98304
+```
+
+Too low only costs you early compaction; too high is the `G8` `Internal Server Error`.
 
 Then pick it, three ways:
 
@@ -258,16 +277,16 @@ complete universe of what opencode will request. This is the single most common 
 
 > **Use the model's full ID, publisher prefix included.** A slash in the ID is fine —
 > opencode splits `provider/model` on the *first* slash only, so
-> `local5090/qwen/qwen3.6-27b` resolves correctly (verified with `opencode models`).
+> `local5090/qwen/qwen3.8-27b` resolves correctly (verified with `opencode models`).
 >
 > **Do not "simplify" it by dropping the prefix.** LM Studio will answer a request for
-> the short `qwen3.6-27b` with HTTP 200, which makes the shortcut look safe — but it
+> the short `qwen3.8-27b` with HTTP 200, which makes the shortcut look safe — but it
 > treats the short name as a *separate model* and JIT-loads a second copy at the **8192
-> default context**, not your 64k. Both then sit in VRAM:
+> default context**, not your 96k. Both then sit in VRAM:
 >
 > ```
-> qwen/qwen3.6-27b    loaded_ctx=65280   ← the one you configured
-> qwen3.6-27b         loaded_ctx=8192    ← duplicate from the short name
+> qwen/qwen3.8-27b    loaded_ctx=98304   ← the one you configured
+> qwen3.8-27b         loaded_ctx=8192    ← duplicate from the short name
 > ```
 >
 > That's a silent `G3` (8k context) stacked on a `G7` (VRAM oversubscription), from a
@@ -288,31 +307,43 @@ for m in json.load(sys.stdin)['data']:
 "
 ```
 
-Current inventory on this box:
+Current inventory (checked 2026-09-08):
 
-All six tool-capable models are declared in config.json. The three without `tool_use` are
-deliberately left out and are being deleted from the box.
+**The box now holds only the two Qwen3.x-27B VLMs.** The older set was cleaned off it, but
+their entries are still declared in config.json — declaring a model that isn't on the box
+is harmless until you *select* it, at which point you get the JIT-load `HTTP 400` above
+(or, with JIT off, a plain model-not-found). Treat the "On box" column as the one that
+decides what you can actually run.
 
-| Model | Tool use | In config | Notes |
-|---|---|---|---|
-| `qwen/qwen3.6-27b` | ✅ | ✅ | **Current default.** VLM, ~19 GB at 64k |
-| `qwen3-coder-30b-a3b-instruct` | ✅ | ✅ | Previous default; ~21 GB at 64k |
-| `qwen/qwen3-coder-next` | ✅ | ✅ | Untested here |
-| `devstral-small-2-24b-instruct-2512` | ✅ | ✅ | The A/B candidate in Open items |
-| `qwen3-30b-a3b-thinking-2507` | ✅ | ✅ | Reasoning variant — expect the token burn described below |
-| `openai/gpt-oss-20b` | ✅ | ✅ | Smallest; leaves real VRAM headroom |
-| `deepseek/deepseek-r1-0528-qwen3-8b` | ❌ | — | Can't tool-call — see below. Deleting |
-| `ibm/granite-3.2-8b` | ❌ | — | No capabilities declared. Deleting |
-| `qwen/qwen2.5-coder-32b` | ❌ | — | No capabilities declared. Deleting |
+| Model | Tool use | On box | In config | Notes |
+|---|---|---|---|---|
+| `qwen/qwen3.8-27b` | ✅ | ✅ | ✅ | **Current default.** VLM, Q4_K_M, loaded at 96k (`98304`) |
+| `qwen/qwen3.6-27b` | ✅ | ✅ | ✅ | Previous default. VLM, Q4_K_M, ~19 GB at 64k |
+| `qwen3-coder-30b-a3b-instruct` | ✅ | — | ✅ | Default before 3.6; ~21 GB at 64k. Removed from box |
+| `qwen/qwen3-coder-next` | ✅ | — | ✅ | Never tested here. Removed from box |
+| `devstral-small-2-24b-instruct-2512` | ✅ | — | ✅ | The A/B candidate in Open items. Removed from box |
+| `qwen3-30b-a3b-thinking-2507` | ✅ | — | ✅ | Reasoning variant — expect the token burn described below. Removed from box |
+| `openai/gpt-oss-20b` | ✅ | — | ✅ | Smallest; left real VRAM headroom. Removed from box |
+| `deepseek/deepseek-r1-0528-qwen3-8b` | ❌ | — | — | Can't tool-call — see below |
+| `ibm/granite-3.2-8b` | ❌ | — | — | No capabilities declared |
+| `qwen/qwen2.5-coder-32b` | ❌ | — | — | No capabilities declared |
 
 Capability metadata is only populated once a model has been loaded at least once, so a
 never-loaded model may report nothing until you load it. Treat "no capabilities" on a
 never-loaded model as unknown, not as a definite ❌.
 
-Verify the whole set resolves through opencode, not just LM Studio:
+Verify the set resolves through opencode, not just LM Studio:
 
 ```bash
-opencode models local5090     # must list all six
+opencode models local5090     # lists the 7 declared entries, box contents notwithstanding
+```
+
+`opencode models` reads config.json, **not** the box — it will happily list a model that
+was deleted from the 5090. Cross-check against `/v1/models` before blaming opencode:
+
+```bash
+curl -s http://192.168.1.194:1234/v1/models | python3 -c \
+  "import json,sys; [print(m['id']) for m in json.load(sys.stdin)['data']]"
 ```
 
 ### Don't use DeepSeek-R1-8B as the driver model

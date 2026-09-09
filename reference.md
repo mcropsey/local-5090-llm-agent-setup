@@ -259,6 +259,28 @@ Consequences:
 
 ---
 
+## Model layer — verified 2026-09-08
+
+Only the model/serving layer was re-checked on this date; the table above still stands as
+the last full-stack check.
+
+| Check | Result |
+|---|---|
+| Default model | `local5090/qwen/qwen3.8-27b` (was `qwen/qwen3.6-27b`) |
+| `GET /v1/models` | `qwen/qwen3.8-27b`, `qwen/qwen3.6-27b`, `text-embedding-nomic-embed-text-v1.5` — **nothing else** |
+| Qwen3.8 metadata | `vlm`, `capabilities: ["tool_use"]`, Q4_K_M, max ctx 262144, **loaded at 98304** |
+| Loaded models | one (`qwen/qwen3.8-27b`) — no `G7` oversubscription |
+| Tool-call smoke test | `finish_reason: tool_calls`, 1 call — `bash({"command":"ls -la"})`, 57 reasoning tokens |
+| `opencode models local5090` | resolves all 7 declared entries, including the new `qwen/qwen3.8-27b` |
+| config `limit.context` | set to `98304` for Qwen3.8 to match the loaded context (the `G8` rule) |
+
+Drift worth knowing: five tool-capable models (`qwen3-coder-30b-a3b-instruct`,
+`qwen/qwen3-coder-next`, `devstral-small-2-24b-instruct-2512`,
+`qwen3-30b-a3b-thinking-2507`, `openai/gpt-oss-20b`) are still declared in config.json but
+are **no longer on the box**. Selecting one fails at request time, not at startup.
+
+---
+
 ## Open items
 
 | Item | Notes |
@@ -267,7 +289,8 @@ Consequences:
 | aws-docs MCP | `awslabs.aws-documentation-mcp-server@latest` — add alongside searxng in config.json |
 | Qdrant RAG | Local RAG over `~/lab-kb` using `nomic-embed-text-v1.5` (already in LM Studio). Closes the "your own infra" grounding gap. Add after web search is solid. |
 | Frontier hybrid | Anthropic provider in config.json as escape hatch for hard tasks. Template in runbook. |
-| Model A/B | Devstral vs Qwen3-Coder — re-run the same tool-calling task on both and compare reliability |
+| Model A/B | ~~Devstral vs Qwen3-Coder~~ — both were deleted from the box (2026-09-08). Re-scope to Qwen3.8 vs Qwen3.6, or re-download a candidate first |
+| Prune stale model entries | config.json still declares 5 models that are no longer on the 5090. Either delete the entries or re-download the models |
 | Pin mcp-searxng | Lock `mcp-searxng@<version>` in config.json instead of `npx -y` (pulls latest silently) |
 | LM Studio auth | Enable `Require Authentication` on port 1234 before any exposure beyond the home LAN |
 
