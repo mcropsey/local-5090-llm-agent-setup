@@ -1,59 +1,137 @@
 # Local Agentic Stack — Ground-Up Runbook
 
-Follow this top to bottom on a fresh machine. Three machines involved:
+Build a fully local coding agent from scratch: a GPU box serving an LLM, a laptop
+running the [opencode](https://opencode.ai) harness, and a self-hosted SearXNG search
+engine — no cloud model, no API key, nothing leaving your LAN.
 
-| Machine | IP | Role |
-|---|---|---|
-| Laptop (macOS) | — | opencode harness, SSH client, AWS CLI |
-| 5090 box (Windows) | 192.168.1.194 | LM Studio — serves the model |
-| hv-rocky-linux-4 (Rocky) | 192.168.1.101 | SearXNG container (rootful podman) |
+Follow this top to bottom on fresh machines. Nothing here assumes you already have any
+config; every file you need is written out in full, in the order you need it.
 
 ---
 
-## Phase 1 — Serve the model (5090 box)
+## 0 — Before you start
 
-**Tooling:** LM Studio (GUI, already installed on the 5090)
+### 0.1 What you need
+
+**Three machines** (they can be three physical boxes, or VMs — they just need to reach
+each other on the same LAN):
+
+| Machine | OS | Role | Must have |
+|---|---|---|---|
+| GPU box | Windows/Linux/macOS | Serves the model | A GPU with enough VRAM (see below) + [LM Studio](https://lmstudio.ai) |
+| Laptop | macOS (Linux works too) | Runs the opencode harness | `curl`, `git`, and Node.js (for `npx`) |
+| Search host | Linux (this guide uses Rocky) | Runs SearXNG | `podman` (or Docker) |
+
+> **VRAM guide:** a 30B-class MoE model (e.g. Qwen3-Coder-30B-A3B) at Q4 is ~18–21 GB
+> at 64k context, which fits a 32 GB card with room for the KV cache and nothing else.
+> On 24 GB, drop to a ~20–24B model or a shorter context. On 16 GB, expect to run a
+> smaller model at reduced context.
+
+**Software to install first** (do this before Phase 1):
+
+- **GPU box:** Install LM Studio and launch it once.
+- **Laptop:** Confirm `curl` and `git` exist (`curl --version`, `git --version`). Install
+  Node.js if `npx --version` fails — the search MCP is fetched via `npx`.
+- **Search host:** Install podman (`sudo dnf install -y podman` on Rocky/RHEL, or
+  `sudo apt install -y podman` on Debian/Ubuntu). Docker works too; substitute `docker`
+  for `podman` throughout Phase 3.
+
+### 0.2 Fill in your values
+
+This guide is written with **reference values** (a specific set of IPs, a username, and a
+model). If your setup matches them, every command below is copy-paste ready. If not,
+decide your values now and either substitute as you go or find-and-replace them in this
+file first.
+
+| Placeholder | Reference value | What it is |
+|---|---|---|
+| `USER` | `mcropsey` | The Linux/SSH login on your search host (and any server the agent reaches) |
+| `GPU_HOST` | `192.168.1.194` | LAN IP of the GPU box running LM Studio |
+| `SEARX_HOST` | `192.168.1.101` | LAN IP of the SearXNG host |
+| `LAB_HOST` | `192.168.1.102` | Optional extra host for lab MCP servers (skippable) |
+| `MODEL_ID` | `qwen/qwen3.8-27b` | The exact model ID LM Studio serves (you confirm this in Phase 1) |
+
+> **Don't invent the model ID.** You'll read the real one off the server in Phase 1
+> step 5 and use it verbatim from then on. The reference `qwen/qwen3.8-27b` is only an
+> example — whatever `GET /v1/models` returns on *your* box is the truth.
+
+### 0.3 The machines at a glance
+
+| Machine | IP (reference) | Role |
+|---|---|---|
+| Laptop (macOS) | — | opencode harness, SSH client, AWS CLI |
+| GPU box (Windows) | `192.168.1.194` | LM Studio — serves the model |
+| Search host (Rocky Linux) | `192.168.1.101` | SearXNG container (rootful podman) |
+
+---
+
+## Phase 1 — Serve the model (GPU box)
+
+**Tooling:** LM Studio (GUI). Install it and open it once before starting.
 
 1. **Enable Developer mode**
    Settings → Developer → toggle **Developer mode** ON. This unlocks the Developer tab.
 
-2. **Load a model**
-   Discover tab → download **Qwen3-Coder-30B-A3B**. When loading, set on the **Load** tab (not Inference):
-   - Context length (`n_ctx`): **65536** (64k)
+2. **Download and load a tool-capable model**
+   Discover tab → download a model that can make tool calls (this is non-negotiable —
+   opencode is entirely tool-driven). Good starting choices: **Qwen3-Coder-30B-A3B**, a
+   **Qwen3.x-27B**, or **Devstral Small 24B**. Avoid pure reasoning models like
+   DeepSeek-R1 as the driver (see "Which models can drive the harness" below).
+
+   When loading, set these on the **Load** tab (not Inference):
+   - Context length (`n_ctx`): **65536** (64k) — start here
    - Flash Attention: **ON**
    - KV Cache Quantization: **Q8** (K and V)
-   - Quant: Q4_K_M or Q5 — below Q4 tool-calling reliability degrades
+   - Quant: **Q4_K_M or Q5** — below Q4, tool-calling reliability degrades
 
-   > VRAM math: 30B-A3B at Q4 ≈ 18 GB, leaving ~13 GB for KV cache on a 32 GB 5090.
-   > Q8 cache quant lets 64k context fit comfortably. Start here; go to 32k if it's tight.
+   > **VRAM math:** a 30B-A3B at Q4 ≈ 18 GB, leaving ~13 GB for KV cache on a 32 GB card.
+   > Q8 cache quant lets 64k context fit comfortably. Start at 64k; drop to 32k if it's
+   > tight. If you have headroom (e.g. a 27B VLM on 32 GB), you can load at 96k instead —
+   > just make sure the number you actually load at matches what you put in `config.json`
+   > later (Phase 2, and the `limit.context` note there).
+
+   > **The whole stack is model-agnostic.** Any tool-capable GGUF works. Wherever this
+   > guide names a specific model, substitute whichever ID `GET /v1/models` returns on
+   > your box.
 
 3. **Start the server**
-   Developer → Local Server → toggle **Status: Running** (port 1234 default).
+   Developer → Local Server → toggle **Status: Running** (port `1234` by default).
 
 4. **Enable LAN access**
-   Gear icon → **Serve on Local Network: ON**. Leave Require Authentication OFF (LAN only — revisit before any external exposure).
+   Gear icon → **Serve on Local Network: ON**. Leave *Require Authentication* OFF — this
+   is a LAN-only setup. (Revisit before any external exposure.)
 
-   **Load exactly one model, and turn JIT loading OFF** (or cap max loaded models at 1).
-   A 32 GB 5090 fits one 30B-A3B at 64k context (~21 GB) and nothing else. A second
-   resident model spills the whole thing to system RAM and drops you from ~65 tok/s to
-   ~1 tok/s, which presents as opencode hanging. JIT is also what silently loads a
-   *duplicate* of the same model: opencode issues its title-generation call concurrently
-   with the main call at session start, and JIT answers the second one by loading another
-   full copy. See `G7` in `reference.md`.
+5. **Load exactly one model, and turn JIT loading OFF**
+   Settings → Developer → turn off **Just-In-Time (JIT) model loading**, and set **idle
+   TTL** to off (or cap **max loaded models** at 1). Then load your model once, manually,
+   and leave it resident.
 
-5. **Verify from the laptop**
+   Why this matters — both defaults cause the two weirdest failure modes on this stack:
+
+   | Setting left ON | Symptom |
+   |---|---|
+   | **JIT model loading** | *Any* API request naming an unloaded model silently loads it. opencode fires a title-generation call concurrently with your first message, and JIT answers it by loading a **second full copy** of the model. Two copies spill VRAM to system RAM, dropping you from ~65 tok/s to ~1 tok/s — which looks exactly like opencode hanging. |
+   | **Idle TTL auto-unload** | The model silently unloads after inactivity. Your next request pays a 30–90 s cold reload before the first token — indistinguishable from a hang. |
+
+   With JIT off and one model pinned, load state is something you control instead of a
+   side effect of whatever last hit the API.
+
+6. **Verify from the laptop**
    ```bash
    curl http://192.168.1.194:1234/v1/models
    ```
-   Should return a JSON list with `qwen3-coder-30b-a3b-instruct` (or similar). Note the exact model ID — you'll need it in Phase 2.
+   This should return a JSON list containing the model you loaded. **Note the exact model
+   ID — publisher prefix and all** (e.g. `qwen/qwen3.8-27b`). You'll need it *verbatim* in
+   Phase 2; this is your `MODEL_ID`.
 
-   First request to a model is slow (30–90 s of VRAM loading). Not a hang.
+   The first request to a freshly loaded model is slow (30–90 s of VRAM loading). That's
+   not a hang.
 
 ---
 
-## Phase 2 — Install opencode (laptop)
+## Phase 2 — Install and configure opencode (laptop)
 
-1. **Install**
+1. **Install opencode**
    ```bash
    curl -fsSL https://opencode.ai/install | bash
    ```
@@ -66,47 +144,63 @@ Follow this top to bottom on a fresh machine. Three machines involved:
    which opencode   # must print ~/.local/bin/opencode
    ```
 
-3. **Set up key auth and passwordless sudo on the Rocky box**
+3. **Give the agent key-based SSH + passwordless sudo on the search host**
 
-   SSH key auth (agent can't answer password prompts):
+   The agent runs commands non-interactively — it can't answer a password prompt. So it
+   needs (a) SSH key auth and (b) passwordless sudo for podman on the search host.
+
+   **SSH key auth:**
    ```bash
-   ssh-keygen -t ed25519            # skip if you already have a key
-   ssh-copy-id mcropsey@192.168.1.101
-   ssh mcropsey@192.168.1.101 hostname   # must return with NO password prompt
+   ssh-keygen -t ed25519                     # skip if you already have a key
+   ssh-copy-id mcropsey@192.168.1.101        # USER@SEARX_HOST
+   ssh mcropsey@192.168.1.101 hostname       # must return with NO password prompt
    ```
 
-   Passwordless sudo for podman (agent needs rootful podman; no TTY for a password prompt):
+   **Passwordless sudo for podman** — run these *on the search host, as root*:
    ```bash
-   # on 192.168.1.101, as root:
    echo 'mcropsey ALL=(ALL) NOPASSWD: /usr/bin/podman' > /etc/sudoers.d/podman-agent
    chmod 440 /etc/sudoers.d/podman-agent
    visudo -c    # verify no syntax errors
-
-   # verify from the laptop — must return with no prompt:
+   ```
+   (Replace `mcropsey` with your `USER`.) Then verify from the laptop — must return with
+   no prompt:
+   ```bash
    ssh mcropsey@192.168.1.101 'sudo -n podman ps'
    ```
 
-   Without passwordless sudo, the agent's `sudo podman ps` fails silently — rootless `podman ps` returns an empty list, making SearXNG look gone when it's not.
+   > Without passwordless sudo, the agent's `sudo podman ps` fails silently and it falls
+   > back to *rootless* `podman ps`, which returns an empty list — making SearXNG look
+   > gone when it's actually running fine under rootful podman.
 
-4. **Write `~/.config/opencode/config.json`**
+4. **Create the opencode config directory and `config.json`**
+
+   You don't have a config yet — create the directory and the file now:
+   ```bash
+   mkdir -p ~/.config/opencode
+   ```
+
+   Then write `~/.config/opencode/config.json`. **Substitute your `MODEL_ID` (from
+   Phase 1 step 6) everywhere the reference `qwen/qwen3.8-27b` appears, and your host IPs
+   for the reference ones.**
+
    ```json
    {
      "$schema": "https://opencode.ai/config.json",
-     "model": "local5090/qwen3-coder-30b-a3b-instruct",
+     "model": "local5090/qwen/qwen3.8-27b",
      "provider": {
        "local5090": {
          "npm": "@ai-sdk/openai-compatible",
-         "name": "LM Studio 5090",
+         "name": "LM Studio GPU box",
          "options": {
            "baseURL": "http://192.168.1.194:1234/v1",
            "apiKey": "not-needed"
          },
          "models": {
-           "qwen3-coder-30b-a3b-instruct": {
-             "name": "Qwen3-Coder 30B-A3B",
+           "qwen/qwen3.8-27b": {
+             "name": "Qwen3.8 27B (default)",
              "tools": true,
              "limit": {
-               "context": 65280,
+               "context": 98304,
                "output": 8192
              }
            }
@@ -131,7 +225,7 @@ Follow this top to bottom on a fresh machine. Three machines involved:
          "type": "remote",
          "url": "http://192.168.1.102:8009/mcp/",
          "headers": {
-           "Authorization": "Basic bWlrZTFAbXkubGFiOk15bGFiMTIzIQ=="
+           "Authorization": "Basic <base64-of-user:password>"
          },
          "enabled": false
        }
@@ -142,59 +236,101 @@ Follow this top to bottom on a fresh machine. Three machines involved:
    }
    ```
 
-   Config notes:
-   - File is **`config.json`**, not `opencode.json` — many guides are wrong.
-   - MCP schema is `mcp` / `type: "local"` / `command` as an **array**. The generic
-     `mcpServers` + `command`/`args` shape won't load.
-   - **`"bash": "ask"` is the whole permission block.** It accepts a bare string, so you
-     don't need per-command patterns. Every command prompts — including `sudo`, `rm`,
-     anything — and nothing is pre-approved or blocked. This replaced a 57-line pattern
-     list; the patterns were never sent to the model and cost nothing in tokens, but they
-     were easy to get subtly wrong and hard to audit. Approve at the prompt instead.
-   - `"context": 65280`, not 65536. LM Studio reports `loaded_context_length: 65280` when
-     you ask for 64k, and opencode uses this number to decide when to compact. Setting it
-     256 tokens too high means requests at the top of the window get rejected with
-     `Internal Server Error` — see `G8` in `reference.md`.
-   - **`searxng` is enabled; `noname` and `crapi` ship disabled.** Those two add 68 tool
-     definitions and ~8,000 prompt tokens to *every* request. Flip `enabled` to `true`
-     when doing API security work, then back to `false`. Full instructions and measured
-     costs: `mcp-servers.md`.
+   **Config notes — read these, they're the difference between working and not:**
 
-5. **Verify opencode connects**
+   - **The provider key `local5090` is just a label** — name it whatever you like, but
+     it becomes the prefix in your model string (`local5090/<MODEL_ID>`) and in
+     `opencode -m <prefix>/<MODEL_ID>`. Keep it consistent everywhere.
+   - **`model` and the `models` block must use your real `MODEL_ID`.** The reference shows
+     `qwen/qwen3.8-27b`; yours is whatever Phase 1 step 6 returned. A slash in the ID is
+     fine — opencode splits `provider/model` on the *first* slash only, so
+     `local5090/qwen/qwen3.8-27b` resolves correctly.
+   - **`limit.context` must be LM Studio's reported `loaded_context_length`, not the
+     number you typed into the GUI.** Ask for 64k and it reports `65280`, not `65536`; a
+     27B loaded at 96k reports exactly `98304`. opencode uses this number to decide when
+     to compact — set it even 256 tokens too high and requests near the top of the window
+     get rejected with `Internal Server Error`. Read the real number off your box:
+     ```bash
+     curl -s http://192.168.1.194:1234/api/v0/models | python3 -c "
+     import json,sys
+     for m in json.load(sys.stdin)['data']:
+         if m.get('state')=='loaded':
+             print(f\"{m['id']:38s} loaded_ctx={m.get('loaded_context_length')}\")
+     "
+     ```
+     Put that number in `limit.context`. Too low only costs you early compaction; too high
+     is the `Internal Server Error`.
+   - **`"bash": "ask"` is the entire permission block.** It takes a bare string, so you
+     don't need per-command patterns. Every command prompts you for approval — including
+     `sudo`, `rm`, anything — and nothing is pre-approved or blocked. Approve at the
+     prompt.
+   - **Only `searxng` is enabled; `noname` and `crapi` ship disabled.** They're optional
+     lab MCP servers (they point at `LAB_HOST` and add ~68 tool definitions / ~8,000
+     prompt tokens to *every* request). **You can delete both entries entirely** if you
+     don't have those services — the stack works fine with just `searxng`. If you do use
+     `crapi`, generate its auth header yourself rather than reusing anyone's:
+     ```bash
+     printf 'user:password' | base64        # → paste into the Authorization header
+     ```
+   - **The file is `config.json`.** opencode also accepts `opencode.json` /
+     `opencode.jsonc` in the same directory and merges all of them; this guide uses
+     `config.json` throughout, so if you follow other guides that say `opencode.json`,
+     just pick one name and stay consistent.
+
+5. **(Optional) Add keybinds for switching models — `tui.json`**
+
+   If you want to change models from inside the TUI, create
+   `~/.config/opencode/tui.json`:
+   ```json
+   {
+     "$schema": "https://opencode.ai/tui.json",
+     "keybinds": {
+       "model_list": "ctrl+alt+m",
+       "model_cycle_recent": "ctrl+alt+."
+     }
+   }
+   ```
+   `model_list` opens the model picker; `model_cycle_recent` cycles recently used models.
+   (Recent opencode versions ship defaults for these — `<leader>m` and `f2` — but binding
+   them explicitly here means you don't depend on the version.) You can skip this entirely
+   and just set the default model via `config.json`'s top-level `"model"`.
+
+6. **Verify opencode connects**
    ```bash
    mkdir ~/opencode-test && cd ~/opencode-test
    git init
    opencode
    ```
-   Ask it: `"List the files in this directory."` — it should **run the tool** and return actual output, not hallucinate a file list.
+   Ask it: `"List the files in this directory."` — it should **run the tool** and return
+   actual output, not hallucinate a file list.
 
-   If you get `exceeds the available context size (8192 tokens)` → go back to LM Studio and set context to 64k, then reload the model.
+   If you get `exceeds the available context size (8192 tokens)`, opencode is talking to a
+   model loaded at the 8k default — go back to LM Studio, load your model at 64k (or your
+   chosen size), and confirm `limit.context` matches.
 
 ---
 
 ## Switching models — and why loading one in LM Studio isn't enough
 
-**Loading a model in LM Studio does not make opencode use it.** opencode only ever requests
-the model IDs declared in its `provider.local5090.models` block, and it defaults to
-`config.json`'s top-level `"model"`. Load DeepSeek in the GUI, and opencode still asks for
-`qwen3-coder-30b-a3b-instruct` — LM Studio then has to JIT-load Qwen *alongside* DeepSeek,
-which on a 32 GB card can fail outright:
+**Loading a model in LM Studio does not make opencode use it.** opencode only ever
+requests the model IDs declared in its `provider.<name>.models` block, and it defaults to
+`config.json`'s top-level `"model"`. Load a different model in the GUI, and opencode still
+asks for the configured one — LM Studio then has to JIT-load *your configured* model
+alongside the one you just loaded, which on a 32 GB card can fail outright:
 
 ```
-HTTP 400  Failed to load model "qwen3-coder-30b-a3b-instruct".
+HTTP 400  Failed to load model "<your-model-id>".
           Error: Engine protocol startup was aborted.
 ```
 
-That 400 is what "opencode won't connect" actually looks like. Observed on this stack —
-and it's intermittent, because it depends on what else is resident at that moment.
+That 400 is what "opencode won't connect" actually looks like — and it's intermittent,
+because it depends on what else is resident at that moment.
 
-To actually switch models you must declare the model, then select it:
-
-Every tool-capable model on the box, as currently configured:
+To actually switch models you must **declare the model in config, then select it.** Add
+each tool-capable model you want to use as an entry in the `models` block. Example with
+several declared:
 
 ```json
-"model": "local5090/qwen/qwen3.8-27b",
-...
 "models": {
   "qwen/qwen3.8-27b": {
     "name": "Qwen3.8 27B (default)",
@@ -211,18 +347,8 @@ Every tool-capable model on the box, as currently configured:
     "tools": true,
     "limit": { "context": 65280, "output": 8192 }
   },
-  "qwen/qwen3-coder-next": {
-    "name": "Qwen3-Coder Next",
-    "tools": true,
-    "limit": { "context": 65280, "output": 8192 }
-  },
   "devstral-small-2-24b-instruct-2512": {
     "name": "Devstral Small 2 24B",
-    "tools": true,
-    "limit": { "context": 65280, "output": 8192 }
-  },
-  "qwen3-30b-a3b-thinking-2507": {
-    "name": "Qwen3 30B-A3B Thinking",
     "tools": true,
     "limit": { "context": 65280, "output": 8192 }
   },
@@ -234,68 +360,47 @@ Every tool-capable model on the box, as currently configured:
 }
 ```
 
-`limit.context` is `65280` for the 64k-loaded entries because that's what LM Studio reports
-when you ask for 64k. **It is a per-model claim, not a global one** — if you load one of
-these at a different context, fix its entry or you get the `G8` overrun. Qwen3.8 is the
-live example: it is loaded at 96k, so its entry says `98304`. Read the number off the box
-rather than copying a neighbour's:
+> `limit.context` is **per model, not global.** The `65280` above is what LM Studio
+> reports for a 64k load; a model loaded at a different context needs its own number
+> (e.g. `98304` for 96k). Read each one off `/api/v0/models` as shown in Phase 2 step 4
+> — don't copy a neighbour's number.
 
-```bash
-curl -s http://192.168.1.194:1234/api/v0/models | python3 -c "
-import json,sys
-for m in json.load(sys.stdin)['data']:
-    if m.get('state')=='loaded':
-        print(f\"{m['id']:38s} loaded_ctx={m.get('loaded_context_length')}\")
-"
-# qwen/qwen3.8-27b    loaded_ctx=98304
-```
-
-Too low only costs you early compaction; too high is the `G8` `Internal Server Error`.
-
-Then pick it, three ways:
+Then pick a model three ways:
 
 | How | Command / key | Scope |
 |---|---|---|
-| Default | top-level `"model": "local5090/<id>"` in config.json | every session |
-| Per session | `opencode -m local5090/<id>` | that launch only |
-| Mid-session | `ctrl+alt+m` (model list), `ctrl+alt+.` (cycle recent) | that session |
+| Default | top-level `"model": "local5090/<MODEL_ID>"` in config.json | every session |
+| Per session | `opencode -m local5090/<MODEL_ID>` | that launch only |
+| Mid-session | the keybinds you set in `tui.json` (Phase 2 step 5) | that session |
 
-The two keybinds are bound in `~/.config/opencode/tui.json` — opencode ships the
-`model_list` / `model_cycle_recent` actions with **no default key**, so they do nothing
-until you bind them.
-
-Confirm opencode can actually see a model before launching the TUI:
-
+**Confirm opencode can see a model before launching the TUI:**
 ```bash
 opencode models local5090
 ```
-
-**If it isn't in that list, opencode cannot use it — full stop.** There is no
+**If it isn't in that list, opencode cannot use it — full stop.** There's no
 auto-discovery of LM Studio's loaded models; the `models` block in config.json is the
-complete universe of what opencode will request. This is the single most common reason
-"I loaded it but opencode won't use it."
+*complete* universe of what opencode will request. This is the single most common reason
+for "I loaded it but opencode won't use it."
 
-> **Use the model's full ID, publisher prefix included.** A slash in the ID is fine —
-> opencode splits `provider/model` on the *first* slash only, so
-> `local5090/qwen/qwen3.8-27b` resolves correctly (verified with `opencode models`).
->
-> **Do not "simplify" it by dropping the prefix.** LM Studio will answer a request for
-> the short `qwen3.8-27b` with HTTP 200, which makes the shortcut look safe — but it
-> treats the short name as a *separate model* and JIT-loads a second copy at the **8192
-> default context**, not your 96k. Both then sit in VRAM:
->
+> **`opencode models` reads config.json, not the box.** It will happily list a model you
+> deleted from the GPU box. Cross-check against what's actually loaded:
+> ```bash
+> curl -s http://192.168.1.194:1234/v1/models | python3 -c \
+>   "import json,sys; [print(m['id']) for m in json.load(sys.stdin)['data']]"
 > ```
-> qwen/qwen3.8-27b    loaded_ctx=98304   ← the one you configured
-> qwen3.8-27b         loaded_ctx=8192    ← duplicate from the short name
-> ```
->
-> That's a silent `G3` (8k context) stacked on a `G7` (VRAM oversubscription), from a
-> config that looks like it works. Match the ID from `/api/v0/models` exactly.
+> Selecting a declared-but-absent model triggers the JIT-load `HTTP 400` above (or, with
+> JIT off, a plain model-not-found).
 
-### Which models on the 5090 can actually drive the harness
+> **Always use the full model ID, publisher prefix included.** LM Studio will answer a
+> request for a short name (e.g. `qwen3.8-27b` instead of `qwen/qwen3.8-27b`) with HTTP
+> 200 — which makes the shortcut *look* safe — but it treats the short name as a separate
+> model and JIT-loads a second copy at the **8192 default context**. You end up with two
+> copies in VRAM, one of them crippled at 8k. Match the ID from `/api/v0/models` exactly.
 
-opencode is tool-driven, so `tool_use` is non-negotiable. Ask LM Studio rather than
-guessing — it publishes capabilities per model:
+### Which models can actually drive the harness
+
+opencode needs `tool_use`. Ask LM Studio rather than guessing — it publishes capabilities
+per model:
 
 ```bash
 curl -s http://192.168.1.194:1234/api/v0/models | python3 -c "
@@ -307,99 +412,32 @@ for m in json.load(sys.stdin)['data']:
 "
 ```
 
-Current inventory (checked 2026-09-08):
+Rules of thumb:
 
-**The box now holds only the two Qwen3.x-27B VLMs.** The older set was cleaned off it, but
-their entries are still declared in config.json — declaring a model that isn't on the box
-is harmless until you *select* it, at which point you get the JIT-load `HTTP 400` above
-(or, with JIT off, a plain model-not-found). Treat the "On box" column as the one that
-decides what you can actually run.
-
-| Model | Tool use | On box | In config | Notes |
-|---|---|---|---|---|
-| `qwen/qwen3.8-27b` | ✅ | ✅ | ✅ | **Current default.** VLM, Q4_K_M, loaded at 96k (`98304`) |
-| `qwen/qwen3.6-27b` | ✅ | ✅ | ✅ | Previous default. VLM, Q4_K_M, ~19 GB at 64k |
-| `qwen3-coder-30b-a3b-instruct` | ✅ | — | ✅ | Default before 3.6; ~21 GB at 64k. Removed from box |
-| `qwen/qwen3-coder-next` | ✅ | — | ✅ | Never tested here. Removed from box |
-| `devstral-small-2-24b-instruct-2512` | ✅ | — | ✅ | The A/B candidate in Open items. Removed from box |
-| `qwen3-30b-a3b-thinking-2507` | ✅ | — | ✅ | Reasoning variant — expect the token burn described below. Removed from box |
-| `openai/gpt-oss-20b` | ✅ | — | ✅ | Smallest; left real VRAM headroom. Removed from box |
-| `deepseek/deepseek-r1-0528-qwen3-8b` | ❌ | — | — | Can't tool-call — see below |
-| `ibm/granite-3.2-8b` | ❌ | — | — | No capabilities declared |
-| `qwen/qwen2.5-coder-32b` | ❌ | — | — | No capabilities declared |
-
-Capability metadata is only populated once a model has been loaded at least once, so a
-never-loaded model may report nothing until you load it. Treat "no capabilities" on a
-never-loaded model as unknown, not as a definite ❌.
-
-Verify the set resolves through opencode, not just LM Studio:
-
-```bash
-opencode models local5090     # lists the 7 declared entries, box contents notwithstanding
-```
-
-`opencode models` reads config.json, **not** the box — it will happily list a model that
-was deleted from the 5090. Cross-check against `/v1/models` before blaming opencode:
-
-```bash
-curl -s http://192.168.1.194:1234/v1/models | python3 -c \
-  "import json,sys; [print(m['id']) for m in json.load(sys.stdin)['data']]"
-```
-
-### Don't use DeepSeek-R1-8B as the driver model
-
-It cannot make tool calls, which is the one thing the harness needs. Same prompt, same
-tool definition, measured side by side:
-
-| Model | `finish_reason` | `tool_calls` | Reasoning tokens |
-|---|---|---|---|
-| qwen3-coder-30b-a3b | `tool_calls` | **1** — `bash({"command":"ls -la"})` | 0 |
-| deepseek-r1-0528-qwen3-8b | `stop` | **0** | 1,139 |
-
-DeepSeek answered by *typing* a markdown fence — <code>```bash ls ```</code> — as ordinary
-text instead of emitting a structured call. LM Studio confirms this in its model metadata:
-Qwen advertises `capabilities: ["tool_use"]`, DeepSeek declares no capabilities at all.
-
-Two more things make it a poor fit:
-
-- **It burns the output budget thinking.** At `max_tokens: 200` it spent 198 tokens
-  reasoning and returned `content: ""` with `finish_reason: "length"` — a blank reply. It
-  needed ~380 tokens just to answer "what is 2+2?".
-- **Its answer lands in the wrong field.** Reasoning models put text in
-  `reasoning_content`, which is a DeepSeek/LM Studio extension that
-  `@ai-sdk/openai-compatible` doesn't read. opencode sees `content: ""` and displays
-  nothing — the `G6` "thinks, emits nothing" symptom, from the model rather than the
-  chat template.
-
-Keep DeepSeek for one-off reasoning questions you ask it directly. Leave Qwen3-Coder as
-the harness driver.
-
-### Turn off JIT loading and idle auto-unload
-
-LM Studio ships with both on, and together they cause the two weirdest symptoms on this
-stack:
-
-| Setting | Symptom when left on |
-|---|---|
-| **JIT model loading** | Models load that you never asked for — *any* API request naming an unloaded model triggers a load. This is what creates the duplicate `qwen3-coder-30b-a3b-instruct:2` instance and what oversubscribes VRAM (`G7`). |
-| **Idle TTL auto-unload** | Models silently unload after inactivity. The next opencode request pays a 30–90 s cold load from disk before the first token — indistinguishable from a hang. |
-
-Settings → Developer → turn off **Just-In-Time model loading** and set the **idle TTL** to
-off (or cap **max loaded models** at 1). Then load Qwen3-Coder once, manually, and leave it
-resident. Load state becomes something you control instead of a side effect of whatever
-last hit the API.
+- **Qwen3-Coder / Qwen3.x / Devstral / GPT-OSS** advertise `tool_use` and drive the
+  harness well.
+- **Reasoning-only models (e.g. DeepSeek-R1-8B) can't tool-call** — they *type* a
+  markdown code fence as ordinary text instead of emitting a structured call. Same prompt,
+  measured side by side: a Qwen coder returns a real `tool_calls` entry; DeepSeek-R1
+  returns `finish_reason: stop`, zero tool calls, and burns its whole output budget
+  "thinking" (it needed ~380 tokens just to answer "what is 2+2?"). Its text also lands in
+  `reasoning_content`, which `@ai-sdk/openai-compatible` doesn't read, so opencode shows a
+  blank reply. Keep such models for direct Q&A; don't use them as the driver.
+- **Capability metadata is only populated once a model has been loaded at least once.** A
+  never-loaded model may report nothing — treat "no capabilities" on a never-loaded model
+  as *unknown*, not a definite no.
 
 ---
 
-## Phase 3 — SearXNG on hv-rocky-linux-4 (.101)
+## Phase 3 — SearXNG on the search host
 
-SearXNG gives the model live web search with no API key and no data leaving the LAN.
-Run everything with `sudo` — this is **rootful** podman deliberately (predictable storage paths, reboot survival via system service).
+SearXNG gives the model live web search with no API key and no data leaving the LAN. Run
+everything with `sudo` — this is **rootful** podman deliberately (predictable storage
+paths, survives reboots via a system service).
 
 ### 3a — Run the container
 
-SSH to .101, then:
-
+SSH to the search host, then:
 ```bash
 sudo podman run -d \
   --name searxng \
@@ -409,19 +447,17 @@ sudo podman run -d \
   docker.io/searxng/searxng:latest
 ```
 
-> **Volume name is `searxng`**, not `searxng-config`. Using the wrong name creates a second orphan volume and leaves the config empty.
+> **The volume name is `searxng`**, not `searxng-config`. A wrong name creates a second
+> orphan volume and leaves the config empty.
 
 ### 3b — Survive reboots
 
-Unlike Docker, podman's `--restart` flag alone does **not** replay containers after a host reboot. Enable the system service that does:
-
+Unlike Docker, podman's `--restart` flag alone does **not** replay containers after a host
+reboot. Enable the system service that does:
 ```bash
 sudo systemctl enable --now podman-restart.service
 ```
-
-`podman-restart.service` starts all containers whose restart policy is `always` or `unless-stopped` (it filters on `should-start-on-boot=true`, which podman sets automatically for both of those policies).
-
-**Verify it is enabled:**
+It starts every container whose restart policy is `always` or `unless-stopped`. Verify:
 ```bash
 systemctl is-enabled podman-restart.service   # should print: enabled
 systemctl is-active  podman-restart.service   # should print: active
@@ -429,12 +465,13 @@ systemctl is-active  podman-restart.service   # should print: active
 
 ### 3c — Enable JSON output (the critical gotcha)
 
-SearXNG ships with only HTML output. The MCP needs JSON. Skip this and every search returns HTTP 403 — no obvious error message.
+SearXNG ships with **only HTML** output. The MCP needs JSON. Skip this and every search
+returns HTTP 403 with no obvious error.
 
 Find the config path:
 ```bash
 sudo podman volume inspect searxng --format '{{.Mountpoint}}'
-# returns: /var/lib/containers/storage/volumes/searxng/_data
+# returns something like: /var/lib/containers/storage/volumes/searxng/_data
 ```
 
 Edit `settings.yml` at that path:
@@ -465,47 +502,42 @@ sudo podman restart searxng
 curl "http://192.168.1.101:8080/search?q=test&format=json"
 ```
 
-- JSON back → good, proceed.
-- HTML or 403 → JSON not enabled, redo 3c.
-- Connection refused → firewall or binding issue; confirm port 8080 is open on .101 and the container published to the LAN interface.
+- **JSON back** → good, proceed.
+- **HTML or 403** → JSON not enabled; redo 3c.
+- **Connection refused** → firewall or binding issue; confirm port 8080 is open on the
+  search host and the container published to the LAN interface.
 
-Don't skip this check. Every downstream problem traces back to SearXNG not returning JSON.
+Don't skip this check. Nearly every downstream search problem traces back to SearXNG not
+returning JSON.
 
-### 3e — mcp-searxng install (automatic)
+### 3e — The search MCP installs itself
 
-`mcp-searxng` is already in your config.json. On first opencode launch, it runs `npx -y mcp-searxng`, which downloads the package from npm and caches it in `~/.npm/_npx/`. No manual install needed.
+`mcp-searxng` is already in the `config.json` you wrote in Phase 2. On first opencode
+launch it runs `npx -y mcp-searxng`, which downloads the package from npm and caches it in
+`~/.npm/_npx/`. No manual install.
 
-Supply-chain note: `npx -y` runs unaudited npm code. Before relying on it, confirm the package:
+Supply-chain note: `npx -y` runs unaudited npm code. Before relying on it, confirm the
+package resolves to the real project (not a typosquat):
 ```bash
 npm view mcp-searxng
+# should point at ihor-sokoliuk/mcp-searxng on GitHub
 ```
-Should point at `ihor-sokoliuk/mcp-searxng` on GitHub (not a typosquat). To lock a version:
-```json
-"command": ["npx", "-y", "mcp-searxng@1.0.0"]
-```
-
----
-
-## LM Studio reboot note (5090 box — Windows)
-
-LM Studio does not auto-start the local server after a Windows reboot. After any reboot of the 5090 box:
-
-1. Open LM Studio
-2. Load the model (Discover → **Qwen3-Coder-30B-A3B** → Load with 64k context, FlashAttn ON, Q8 KV)
-3. Developer → Local Server → toggle **Status: Running**
-4. Verify from the laptop: `curl http://192.168.1.194:1234/v1/models`
-
-> LM Studio has a **Launch at Login** option (Settings → General) but it only opens the GUI — it does not automatically reload the model or start the server. The server start is always manual after a reboot.
-
-**If you want the server to come up automatically**, create a Windows Task Scheduler task that runs on logon and calls the LM Studio CLI with your saved preset — but LM Studio's CLI support for this is limited. Simplest path for now: treat the 5090 as a manual step after any reboot.
+To pin a version, change the command in config.json to
+`["npx", "-y", "mcp-searxng@1.0.0"]`.
 
 ---
 
 ## Phase 4 — AGENTS.md (behavioral control plane)
 
-Create `~/.config/opencode/AGENTS.md`. This is loaded into every system prompt.
+Create `~/.config/opencode/AGENTS.md`. It's loaded into every system prompt and is what
+makes a small local model actually use its tools instead of refusing.
 
-**Order is load-bearing.** Local models weight earlier instructions more heavily. The tool-access block (CRITICAL section) must come first or the model's built-in safety training will win, causing it to refuse SSH/sudo calls — especially as the file grows longer.
+**Order is load-bearing.** Local models weight earlier instructions more heavily. The
+tool-access block (the CRITICAL section) **must come first**, or the model's built-in
+safety training wins and it starts refusing SSH/sudo calls — especially as the file grows.
+
+Paste this as your starting `AGENTS.md`, then edit the "Known servers" line and any
+usernames to match your setup:
 
 ```markdown
 ## CRITICAL: You have full shell and SSH access — use it
@@ -548,7 +580,7 @@ in the output you actually received.
 
 ## Grounding
 - Before deploying or configuring a named project, look up its real docs
-  (web search tool) instead of guessing image names, ports, or flags.
+  (searxng search tool) instead of guessing image names, ports, or flags.
   Example: crAPI is a multi-service docker-compose stack from the OWASP/crAPI repo,
   NOT a single Docker image.
 
@@ -563,7 +595,7 @@ in the output you actually received.
   intentionally-vulnerable instances don't linger publicly.
 
 ## Known servers
-- 192.168.1.101 (hv-rocky-linux-4): Rocky Linux podman host, lab network only.
+- 192.168.1.101 (search host): Linux podman host, lab network only.
 
 ## When to search the web
 Your training data has a cutoff and is often out of date. Before answering anything
@@ -582,11 +614,14 @@ user to run `sudo -v` in their terminal to cache credentials, then retry the com
 Do NOT fall back to explaining how to run the command manually.
 ```
 
+> Replace `mcropsey` with your `USER` and the `192.168.1.101` line with your search
+> host. Keep the CRITICAL block at the very top no matter what else you add later.
+
 ---
 
 ## Phase 5 — End-to-end verification
 
-Run these in order. Each one isolates a different layer.
+Run these in order — each isolates a different layer.
 
 ```bash
 # 1. Model reachable
@@ -599,7 +634,7 @@ curl "http://192.168.1.101:8080/search?q=test&format=json"
 ssh mcropsey@192.168.1.101 hostname   # no password prompt
 ```
 
-In opencode:
+Then, inside opencode:
 ```
 # 4. Tool-calling works
 "List the files in this directory."
@@ -608,36 +643,45 @@ In opencode:
 # 5. SSH + rootful podman works
 "SSH to 192.168.1.101 and show me what's running in rootful podman."
 → should run `sudo podman ps` and return SearXNG in the list
-→ if it runs plain `podman ps` and gets an empty list, it reached rootless — Phase 2 step 3 sudo setup is missing
+→ if it runs plain `podman ps` and gets an empty list, it reached rootless —
+  the Phase 2 step 3 sudo setup is missing
 
 # 6. Web search works
 "Search the web for the current recommended way to run OWASP crAPI, and quote the results."
 → should call the searxng tool and quote real results
 
-# 7. AWS works (if needed)
+# 7. AWS works (only if you use AWS)
 "Use your bash tool to run `aws sts get-caller-identity` and show me the actual output."
 → should call the tool; opencode prompts you to approve first
 ```
+
+When all seven pass, the stack is up.
 
 ---
 
 ## Operational gotchas
 
-### sudo fails with "a terminal is required" (macOS local only)
+### sudo fails with "a terminal is required" (laptop local sudo only)
 
-opencode runs bash non-interactively (no TTY). macOS sudo refuses to prompt for a password without one. This affects **local sudo on the laptop** — not remote sudo on .101, which is handled by the NOPASSWD sudoers rule in Phase 2 step 3.
+opencode runs bash non-interactively (no TTY). macOS sudo refuses to prompt for a password
+without one. This affects **local sudo on the laptop** — not remote sudo on the search
+host, which is handled by the NOPASSWD rule in Phase 2 step 3.
 
-**Fix:** Before any session where local sudo is needed, run once in your terminal:
+**Fix:** before any session that needs local sudo, run once in your terminal:
 ```bash
 sudo -v
 ```
-Caches credentials for ~5 min. Re-run if the session runs long. AGENTS.md already tells the model to prompt you for this instead of giving up.
+Caches credentials for ~5 min; re-run if the session runs long. Your AGENTS.md already
+tells the model to prompt you for this instead of giving up.
 
-### SSH stops working after adding content to AGENTS.md
+### SSH stops working after you add content to AGENTS.md
 
-Adding new sections (like the search rules) pushes the CRITICAL block further from the top. Local model safety training starts winning.
+Adding new sections pushes the CRITICAL block further from the top, and the local model's
+safety training starts winning.
 
-**Fix:** The CRITICAL block must stay at the very top. If SSH breaks after an AGENTS.md edit, this is almost always why. Per-prompt workaround: prefix with "Use bash and SSH to…" — naming the tool explicitly bypasses the filter.
+**Fix:** keep the CRITICAL block at the very top. If SSH breaks right after an AGENTS.md
+edit, this is almost always why. Per-prompt workaround: prefix with "Use bash and SSH
+to…" — naming the tool explicitly bypasses the filter.
 
 ### Podman lock error
 
@@ -650,17 +694,40 @@ sudo podman system renumber    # rebuilds the lock table
 
 ### Model claims success it didn't verify
 
-Classic small-model over-claiming. The AGENTS.md Verification block counters it. Also end prompts with explicit checks: "then run `podman ps` and show me it's actually Up before claiming success."
+Classic small-model over-claiming. The AGENTS.md Verification block counters it. Also end
+prompts with an explicit check: "then run `podman ps` and show me it's actually Up before
+claiming success."
 
 ### Empty response after "thinking"
 
-Tool-call formatting fumble — usually a wrong chat template for the loaded GGUF. Confirm LM Studio is using the model's native tool-use chat template, not a generic one.
+Tool-call formatting fumble — usually the wrong chat template for the loaded GGUF. Confirm
+LM Studio is using the model's native tool-use chat template, not a generic one.
 
 ---
 
-## Optional: hybrid frontier escape hatch
+## LM Studio reboot note (GPU box)
 
-For tasks too hard for the local model, keep a second provider in config.json:
+LM Studio does **not** auto-start the local server after a reboot. After any reboot of the
+GPU box:
+
+1. Open LM Studio.
+2. Load the model (My Models → your model → Load at the **same context** your
+   `config.json` `limit.context` assumes — load it at a different size and you must edit
+   that entry to match), FlashAttn ON, Q8 KV.
+3. Developer → Local Server → toggle **Status: Running**.
+4. Verify from the laptop: `curl http://192.168.1.194:1234/v1/models`.
+
+> LM Studio has a **Launch at Login** option (Settings → General) but it only opens the
+> GUI — it does not reload the model or start the server. On Windows you *can* build a Task
+> Scheduler task that calls the LM Studio CLI with a saved preset on logon, but CLI support
+> for this is limited. Simplest path: treat the GPU box as a manual step after any reboot.
+
+---
+
+## Optional — hybrid frontier escape hatch
+
+For the occasional task too hard for the local model, keep a second provider in
+config.json:
 
 ```json
 "provider": {
@@ -675,7 +742,8 @@ For tasks too hard for the local model, keep a second provider in config.json:
 }
 ```
 
-Switch with `--model frontier/claude-sonnet-5` for the hard 5%; local for everything else.
+Set `ANTHROPIC_API_KEY` in your environment, then switch with
+`--model frontier/claude-sonnet-5` for the hard 5%; local for everything else.
 
 ---
 
@@ -683,27 +751,39 @@ Switch with `--model frontier/claude-sonnet-5` for the hard 5%; local for everyt
 
 ```bash
 # One-time per server the agent should reach:
-ssh-copy-id mcropsey@<ip>
-ssh mcropsey@<ip> hostname    # verify: no password prompt
+ssh-copy-id USER@<ip>
+ssh USER@<ip> hostname          # verify: no password prompt
 
-# Before any session needing sudo:
+# Before any session needing local sudo (laptop):
 sudo -v
 
-# Wedged podman containers:
+# Wedged podman containers (on the search host):
 sudo podman rm -f <id>
 sudo podman stop --all
 sudo podman system renumber
 
-# SearXNG container management (all with sudo):
+# SearXNG container management (all with sudo, on the search host):
 sudo podman ps                                                  # verify it's Up
 sudo podman restart searxng
 sudo podman volume inspect searxng --format '{{.Mountpoint}}'  # settings.yml lives here/_data/
+
+# Read the real loaded context length off the GPU box:
+curl -s http://GPU_HOST:1234/api/v0/models | python3 -c "
+import json,sys
+for m in json.load(sys.stdin)['data']:
+    if m.get('state')=='loaded': print(m['id'], m.get('loaded_context_length'))
+"
 ```
 
 | File | Path | Purpose |
 |---|---|---|
 | `config.json` | `~/.config/opencode/config.json` | Provider, MCP, permissions |
+| `tui.json` | `~/.config/opencode/tui.json` | TUI keybinds (optional) |
 | `AGENTS.md` (global) | `~/.config/opencode/AGENTS.md` | Behavior rules, machine-wide |
 | `AGENTS.md` (project) | launch directory | Per-project overrides |
-| LM Studio API | `http://192.168.1.194:1234/v1` | OpenAI-compatible endpoint |
-| SearXNG | `http://192.168.1.101:8080` | Self-hosted metasearch |
+| LM Studio API | `http://GPU_HOST:1234/v1` | OpenAI-compatible endpoint |
+| SearXNG | `http://SEARX_HOST:8080` | Self-hosted metasearch |
+
+**Reference values used in this guide** — substitute your own:
+`USER=mcropsey`, `GPU_HOST=192.168.1.194`, `SEARX_HOST=192.168.1.101`,
+`LAB_HOST=192.168.1.102`, `MODEL_ID=qwen/qwen3.8-27b`.
